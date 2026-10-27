@@ -86,18 +86,29 @@ STUB
 cat > bin/curl <<'STUB'
 #!/usr/bin/env bash
 echo "$@" >> "$GL_LOG"
-url=; method=GET; tok=; data=
+url=; method=GET; tok=; data=; bearer=; basic=
 while IFS= read -r line; do
   case $line in
     'url = "'*) url=${line#url = \"}; url=${url%\"};;
     'request = "'*) method=${line#request = \"}; method=${method%\"};;
     'header = "PRIVATE-TOKEN: '*) tok=${line#header = \"PRIVATE-TOKEN: }; tok=${tok%\"};;
     'data = "'*) data=${line#data = \"}; data=${data%\"};;
+    'header = "Authorization: Bearer '*) bearer=${line#header = \"Authorization: Bearer }; bearer=${bearer%\"};;
+    'user = "'*) basic=${line#user = \"}; basic=${basic%\"};;
   esac
 done
 data=${data//\\\"/\"}
 echo "$method $url data:$data" >> "$GL_LOG.req"; echo "gl-token-from:$tok" >> "$GL_LOG.env"
 reply() { printf '%s\n%s' "$2" "$1"; exit 0; }
+echo "bb-cred-from:${bearer:-$basic}" >> "$GL_LOG.env"
+if [[ $url == https://api.bitbucket.org/* ]]; then
+  [[ $bearer == bbtok || $basic == me:apppw ]] || reply 401 '{}'
+  slug=${url#https://api.bitbucket.org/2.0/repositories/}
+  case $method in
+    GET) [[ -d $BB_REMOTES/$slug.git ]] && reply 200 '{"slug":"x"}' || reply 404 '{"type":"error"}';;
+    POST) git init -q --bare "$BB_REMOTES/$slug.git"; reply 200 '{"slug":"x"}';;
+  esac
+fi
 [[ $tok == gltok ]] || reply 401 '{"message":"401 Unauthorized"}'
 path=${url#https://gitlab.com/api/v4}
 case "$method $path" in
@@ -110,16 +121,18 @@ case "$method $path" in
 esac
 reply 404 '{}'
 STUB
-chmod +x bin/gh bin/ssh bin/az bin/curl; export GL_LOG=$t/gl.log GL_REMOTES=$t/gitlab; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=9 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
-  GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
+chmod +x bin/gh bin/ssh bin/az bin/curl; export GL_LOG=$t/gl.log GL_REMOTES=$t/gitlab BB_REMOTES=$t/bitbucket; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
+export GIT_CONFIG_COUNT=11 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+  GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@example.org:" \
   GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
   GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
   GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:" \
   GIT_CONFIG_KEY_5="url.$t/azure/.insteadOf" GIT_CONFIG_VALUE_5="https://dev.azure.com/" \
   GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/" \
   GIT_CONFIG_KEY_7="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_7="https://gitlab.com/" \
-  GIT_CONFIG_KEY_8="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_8="git@gitlab.com:"
+  GIT_CONFIG_KEY_8="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_8="git@gitlab.com:" \
+  GIT_CONFIG_KEY_9="url.$t/bitbucket/.insteadOf" GIT_CONFIG_VALUE_9="https://bitbucket.org/" \
+  GIT_CONFIG_KEY_10="url.$t/bitbucket/.insteadOf" GIT_CONFIG_VALUE_10="git@bitbucket.org:"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -158,7 +171,16 @@ GL_TOK=gltok check "gitlab: unknown group fails without creating" bash -c "! '$g
 mkdir -p gitlab/me/broken.git
 GL_TOK=gltok check "gitlab: an existing unreadable project is not recreated" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/broken && ! grep -q '\"path\":\"broken\"' '$t/gl.log.req'"
 GL_TOK=gltok check "gitlab: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj5 && grep -q 'gl-token-from:gltok' '$t/gl.log.env' && ! grep -q gltok '$t/gl.log'"
-check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
+BB_TOK=bbtok check "bitbucket: --create makes a private repo with an access token" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/repo1.git && git -C '$t/bitbucket/ws/repo1.git' show-ref --verify -q refs/heads/main && grep -q '\"is_private\":true' '$t/gl.log.req' && grep -q '\"scm\":\"git\"' '$t/gl.log.req'"
+BB_TOK=bbtok check "bitbucket: --public sets is_private false" bash -c "'$gs' --create --public --dst-token-env BB_TOK '$t/src' git@bitbucket.org:ws/repo2.git && grep -q '\"is_private\":false' '$t/gl.log.req'"
+BB_PW=apppw GIT_SYNC_DST_USER=me check "bitbucket: dst_user switches to an app password" bash -c "'$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/repo3 && grep -q 'bb-cred-from:me:apppw' '$t/gl.log.env'"
+BB_TOK=bbtok check "bitbucket: --dry-run creates nothing" bash -c "'$gs' --create --dry-run --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/dry && [[ ! -d '$t/bitbucket/ws/dry.git' ]]"
+check "bitbucket: no token configured is refused" bash -c "! '$gs' --create '$t/src' https://bitbucket.org/ws/notoken && [[ ! -d '$t/bitbucket/ws/notoken.git' ]]"
+BB_TOK=wrong check "bitbucket: a rejected token fails, also in a dry run" bash -c "! '$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/badtok && ! '$gs' --create --dry-run --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/badtok && [[ ! -d '$t/bitbucket/ws/badtok.git' ]]"
+mkdir -p bitbucket/ws/broken.git
+BB_TOK=bbtok check "bitbucket: an existing unreadable repo is not recreated" bash -c "! '$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/broken && ! grep -q 'POST.*ws/broken' '$t/gl.log.req'"
+BB_TOK=bbtok check "bitbucket: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/repo4 && grep -q 'bb-cred-from:bbtok' '$t/gl.log.env' && ! grep -q bbtok '$t/gl.log'"
+check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@example.org:me/x.git"
 
 echo "$pass passed, $fail failed"
 exit $((fail > 0))

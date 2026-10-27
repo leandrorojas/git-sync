@@ -16,7 +16,7 @@
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
 #   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`,
-#               gitlab.com via its API (needs a token: --dst-token-env or dst_token_env=)
+#               gitlab.com and bitbucket.org via their APIs (need a token: --dst-token-env or dst_token_env=)
 #   --public    with --create, make the new repo public
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
@@ -135,13 +135,17 @@ http_dst() {
   [[ $http_code =~ ^[0-9]{3}$ ]] || { http_code=000; http_body=; }
 }
 
+dst_token_required() {
+  [[ -n ${DST_TOKEN_ENV:-} && -n ${!DST_TOKEN_ENV:-} ]] ||
+    { echo "--create on $1 needs a token: set --dst-token-env (or dst_token_env=) to a variable holding one" >&2; return 1; }
+}
+
 gitlab_auth() { printf 'header = "PRIVATE-TOKEN: %s"\n' "${!DST_TOKEN_ENV}"; }
 
 # Same contract as create_github. Needs a token with the api scope in the DST_TOKEN_ENV variable.
 create_gitlab() {
   [[ $1 == */* ]] || { echo "cannot read group/project from the URL" >&2; return 1; }
-  [[ -n ${DST_TOKEN_ENV:-} && -n ${!DST_TOKEN_ENV:-} ]] ||
-    { echo "--create on GitLab needs a token: set --dst-token-env (or dst_token_env=) to a variable holding one" >&2; return 1; }
+  dst_token_required GitLab || return 1
   local api=https://gitlab.com/api/v4 ns=${1%/*} name=${1##*/}
   http_dst gitlab_auth GET "$api/projects/${1//\//%2F}"
   case $http_code in
@@ -157,6 +161,30 @@ create_gitlab() {
   [[ $http_code == 201 ]] || { echo "GitLab answered $http_code when creating the repo" >&2; return 1; }
 }
 
+# With dst_user left at its default the token is sent as a Bearer (repository or workspace access token);
+# with dst_user set it is an app password or API token for that user.
+bitbucket_auth() {
+  if [[ $DST_USER == x-access-token ]]; then printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"
+  else printf 'user = "%s:%s"\n' "$DST_USER" "${!DST_TOKEN_ENV}"; fi
+}
+
+# Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
+create_bitbucket() {
+  [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read workspace/repo from the URL" >&2; return 1; }
+  dst_token_required Bitbucket || return 1
+  local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
+  http_dst bitbucket_auth GET "$url"
+  case $http_code in
+    200) return 2;;
+    404) ;;
+    *) echo "Bitbucket answered $http_code when checking the repo (bad token, missing scope or no network)" >&2; return 1;;
+  esac
+  [[ $2 == check ]] && return 0
+  [[ $visibility == public ]] && private=false
+  http_dst bitbucket_auth POST "$url" "{\"scm\":\"git\",\"is_private\":$private}"
+  [[ $http_code == 200 || $http_code == 201 ]] || { echo "Bitbucket answered $http_code when creating the repo" >&2; return 1; }
+}
+
 create_dest() {
   parse_url "$1"
   local host; host=$(ssh -G "$url_host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
@@ -164,6 +192,7 @@ create_dest() {
     github.com|ssh.github.com) create_github "$url_path" "$2";;
     dev.azure.com|ssh.dev.azure.com) create_azure "$url_path" "$2";;
     gitlab.com) create_gitlab "$url_path" "$2";;
+    bitbucket.org) create_bitbucket "$url_path" "$2";;
     *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac
 }
