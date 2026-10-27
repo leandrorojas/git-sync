@@ -14,6 +14,7 @@ When I say "migrate <old url> to <new url>", or hand over a pairs file:
 - Only git data moves, not issues, PRs, wikis or permissions. Say so before a migration.
 - `--create` runs as the account the provider CLI is logged into (`gh`, `az`), or as the `--dst-token-env` token when one is given. That can differ from the SSH key used to push, and an exported `AZURE_DEVOPS_EXT_PAT` for another org is used too. Check `gh auth status` or `az account show` first.
 - On GitLab a dry run with `--create` checks that the token can read and that the group exists, not that it may create a repo there; a read-only token fails only on the real run.
+- A repo created on Bitbucket lands in the workspace's oldest project; move it afterwards if that matters.
 - On Bitbucket a dry run with `--create` only checks that the token can read: it can't tell a missing workspace from a missing repo, and it doesn't check that the token may create one.
 - GitLab protects the default branch of a new project, so `--force` on it is rejected until force push is allowed in the project settings.
 - The default branch of a new destination isn't set by the script.
