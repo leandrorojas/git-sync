@@ -58,31 +58,38 @@ gitc() {
   fi
 }
 
-# parse_url <url>: sets url_host and url_path (owner/name) for ssh, scp-style and https URLs.
 parse_url() {
   local u=$1
   if [[ $u == *://* ]]; then
-    u=${u#*://}; u=${u#*@}; url_host=${u%%/*}; url_path=${u#*/}
+    u=${u#*://}; u=${u#*@}; url_host=${u%%/*}; url_host=${url_host%%:*}; url_path=${u#*/}
   else
     u=${u#*@}; url_host=${u%%:*}; url_path=${u#*:}
   fi
   url_path=${url_path%.git}; url_path=${url_path%/}
 }
 
-# create_github <owner/name>: 0 created, 1 failed, 2 already exists (so the read failure is access, not a missing repo).
+# gh_dst <gh args...>: run gh as the destination's token when one is set, else as gh's own login.
+gh_dst() {
+  ( if [[ -n ${DST_TOKEN_ENV:-} ]]; then export GH_TOKEN=${!DST_TOKEN_ENV:-}; fi; gh "$@" )
+}
+
+# create_github <owner/name> <check|create>: 0 ok (check: repo is missing), 1 failed, 2 repo already exists,
+# so a failed read of it is an access problem, not a missing repo.
 create_github() {
   command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
-  if gh repo view "$1" >/dev/null 2>&1; then return 2; fi
-  gh repo create "$1" "--$visibility" >/dev/null
+  if gh_dst repo view "$1" >/dev/null 2>&1; then return 2; fi
+  [[ $2 == check ]] && return 0
+  gh_dst repo create "$1" "--$visibility" >/dev/null || return 1
 }
 
-# create_dest <dest-url>: create the destination repo on the host that serves it. One case per supported host.
+# create_dest <dest-url> <check|create>: one case per supported host. An SSH alias is resolved to its real host.
 create_dest() {
   parse_url "$1"
-  case $url_host in
-    github.com) create_github "$url_path";;
-    *) echo "--create does not support host '$url_host' yet" >&2; return 1;;
+  local host; host=$(ssh -G "$url_host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
+  case ${host:-$url_host} in
+    github.com|ssh.github.com) create_github "$url_path" "$2";;
+    *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac
 }
 
@@ -106,10 +113,11 @@ sync_one() {
     { echo "FAIL $name: source has no branches; refusing to continue" >&2; return 1; }
   if ! dstrefs=$(refs DST "$dst"); then
     if (( create )); then
-      if (( dry )); then echo "ok   $name (dry run: destination missing, would create it as $visibility)"; return 0; fi
-      create_dest "$dst"; local rc=$?
+      create_dest "$dst" check; local rc=$?
       (( rc == 2 )) && { echo "FAIL $name: destination exists but cannot be read (auth)" >&2; return 1; }
-      (( rc == 0 )) || { echo "FAIL $name: could not create destination" >&2; return 1; }
+      (( rc == 0 )) || { echo "FAIL $name: cannot create destination" >&2; return 1; }
+      if (( dry )); then echo "ok   $name (dry run: destination missing, would create it as $visibility)"; return 0; fi
+      create_dest "$dst" create || { echo "FAIL $name: could not create destination" >&2; return 1; }
       dstrefs=$(refs DST "$dst") || { echo "FAIL $name: created destination but cannot read it (auth)" >&2; return 1; }
     else
       echo "FAIL $name: cannot read destination (auth, URL or repo missing; --create makes a missing one)" >&2; return 1

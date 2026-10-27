@@ -50,15 +50,18 @@ mkdir -p bin remotes; export GH_LOG=$t/gh.log GH_REMOTES=$t/remotes
 cat > bin/gh <<'STUB'
 #!/usr/bin/env bash
 echo "$@" >> "$GH_LOG"
+[[ -n ${GH_TOKEN:-} ]] && echo "gh-token-from:${GH_TOKEN}" >> "$GH_LOG.env"
 case "$1 $2" in
   "repo view") [[ -d $GH_REMOTES/$3.git ]];;
   "repo create") git init -q --bare "$GH_REMOTES/$3.git";;
 esac
 STUB
 chmod +x bin/gh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+export GIT_CONFIG_COUNT=5 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
   GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
-  GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/"
+  GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
+  GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
+  GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -67,6 +70,16 @@ check "--create makes a private repo and syncs it" bash -c "'$gs' --create '$t/s
 check "--create --public makes a public repo" bash -c "'$gs' --create --public '$t/src' https://github.com/me/pub.git && grep -q -- '--public' '$t/gh.log'"
 mkdir -p remotes/me/broken.git
 check "--create does not recreate an existing unreadable repo" bash -c "! '$gs' --create '$t/src' git@github.com:me/broken.git && ! grep -q 'repo create me/broken' '$t/gh.log'"
+check "--create --dry-run on an existing unreadable repo fails" bash -c "! '$gs' --create --dry-run '$t/src' git@github.com:me/broken.git"
+check "--create accepts ssh:// URLs with a port" bash -c "'$gs' --create '$t/src' ssh://git@github.com:22/me/porturl.git && git -C '$t/remotes/me/porturl.git' show-ref --verify -q refs/heads/main"
+cat > bin/ssh <<'STUB'
+#!/usr/bin/env bash
+[[ $1 == -G ]] || exit 1
+[[ $2 == gh-alias ]] && echo "hostname github.com" || echo "hostname $2"
+STUB
+chmod +x bin/ssh
+check "--create resolves an SSH alias to github.com" bash -c "'$gs' --create '$t/src' git@gh-alias:me/aliased.git && git -C '$t/remotes/me/aliased.git' show-ref --verify -q refs/heads/main"
+DEST_TOK=tok123 check "--create gives gh the destination token, not on argv" bash -c "'$gs' --create --dst-token-env DEST_TOK '$t/src' git@github.com:me/withtoken.git && grep -q 'gh-token-from:tok123' '$t/gh.log.env' && ! grep -q tok123 '$t/gh.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
