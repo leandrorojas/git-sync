@@ -100,7 +100,7 @@ az_dst() {
     az "$@" </dev/null )
 }
 
-# Decodes only %XX sequences; anything else, including a lone % or a backslash, stays as written.
+# Not printf %b on the whole string: that would also expand backslashes and choke on a lone %.
 url_decode() {
   local s=$1 out= re='^([^%]*)%([0-9A-Fa-f]{2})(.*)$'
   while [[ $s =~ $re ]]; do
@@ -126,7 +126,7 @@ create_azure() {
   local orgurl=https://dev.azure.com/$org err
   if err=$(az_dst repos show --repository "$repo" --project "$proj" --organization "$orgurl" -o none 2>&1); then return 2; fi
   [[ $err != *TF200016* ]] ||
-    { echo "Azure DevOps project '$proj' does not exist; --create makes repos, not projects, so create the project first" >&2; return 1; }
+    { echo "Azure DevOps project '$proj' does not exist or is not visible to this login; --create makes repos, not projects, so the project must exist already" >&2; return 1; }
   [[ $err == *TF401019* ]] ||
     { echo "az could not check the repo (azure-devops extension missing, not logged in or bad PAT)" >&2; return 1; }
   [[ $2 == check ]] && return 0

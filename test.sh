@@ -127,7 +127,7 @@ mkdir -p azure/org1/proj1/_git/azbroken
 check "azure: an existing unreadable repo is not recreated" bash -c "! '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azbroken && ! grep -q 'repos create --name azbroken' '$t/az.log'"
 check "azure: an empty --dst-token-env is refused" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/emptytok && ! grep -q 'repos create --name emptytok' '$t/az.log'"
 check "azure: a legacy visualstudio.com URL is reported as unsupported" bash -c "! '$gs' --create '$t/src' https://org1.visualstudio.com/proj1/_git/legacy"
-check "azure: a missing project says to create the project first" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/noproj/_git/r 2>&1 | grep -q 'create the project first'"
+check "azure: a missing project says to create the project first" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/noproj/_git/r 2>&1 | grep -q 'project must exist already'"
 AZ_TOK=aztok check "azure: PAT reaches az through the environment, not argv" bash -c "'$gs' --create --dst-token-env AZ_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/withpat && grep -q 'az-pat-from:aztok' '$t/az.log.env' && ! grep -q aztok '$t/az.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
