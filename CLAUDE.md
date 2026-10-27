@@ -17,6 +17,7 @@ When I say "migrate <old url> to <new url>", or hand over a pairs file:
 - A repo created on Bitbucket lands in the workspace's oldest project; move it afterwards if that matters.
 - On Bitbucket a dry run with `--create` only checks that the token can read: it can't tell a missing workspace from a missing repo, and it doesn't check that the token may create one.
 - GitLab protects the default branch of a new project, so `--force` on it is rejected until force push is allowed in the project settings.
+- A destination that looks missing may be an existing repo the credentials can't see (GitHub, GitLab and Azure answer "not found" for both). `--create` then fails on the real run with an already-exists error, and a dry run can't predict it.
 - The default branch of a new destination isn't set by the script.
 - `--prune` deletes at the destination; without it, branches deleted at the source stay there.
 - `pairs*.txt` and `*.pairs` are git-ignored because they list private URLs. The repo is public: keep real URLs and secrets out of it.
