@@ -101,6 +101,16 @@ az_dst() {
     az "$@" </dev/null )
 }
 
+# Decodes only %XX sequences; anything else, including a lone % or a backslash, stays as written.
+url_decode() {
+  local s=$1 out= re='^([^%]*)%([0-9A-Fa-f]{2})(.*)$'
+  while [[ $s =~ $re ]]; do
+    out+=${BASH_REMATCH[1]}$(printf "\\x${BASH_REMATCH[2]}")
+    s=${BASH_REMATCH[3]}
+  done
+  printf '%s' "$out$s"
+}
+
 # Same contract as create_github. Azure repos have no visibility of their own: it comes from the project.
 create_azure() {
   command -v az >/dev/null || { echo "az is not installed" >&2; return 1; }
@@ -112,7 +122,7 @@ create_azure() {
   elif [[ ${#p[@]} -eq 3 && ${p[1]} == _git ]]; then org=${p[0]} proj=${p[2]} repo=${p[2]}
   elif [[ ${#p[@]} -eq 4 && ${p[0]} == v3 ]]; then org=${p[1]} proj=${p[2]} repo=${p[3]}
   else echo "cannot read organization, project and repo from the URL" >&2; return 1; fi
-  proj=$(printf '%b' "${proj//%/\\x}"); repo=$(printf '%b' "${repo//%/\\x}")
+  proj=$(url_decode "$proj"); repo=$(url_decode "$repo")
   visibility_note="set by the project"
   local orgurl=https://dev.azure.com/$org err
   if err=$(az_dst repos show --repository "$repo" --project "$proj" --organization "$orgurl" -o none 2>&1); then return 2; fi

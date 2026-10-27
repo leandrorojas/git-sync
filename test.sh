@@ -81,7 +81,8 @@ case $cmd in
   create) git init -q --bare "$AZ_REMOTES/$org/$proj/_git/$repo"
           mkdir -p "$AZ_REMOTES_SSH/$org/$proj"; ln -s "$AZ_REMOTES/$org/$proj/_git/$repo" "$AZ_REMOTES_SSH/$org/$proj/$repo"
           [[ $proj != "$repo" ]] || ln -sfn "$AZ_REMOTES/$org/$proj/_git" "$AZ_REMOTES/$org/_git"
-          [[ $proj == "${proj// /%20}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj// /%20}";;
+          [[ $proj == "${proj// /%20}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj// /%20}"
+          [[ $proj == "${proj//&/%26}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj//&/%26}";;
 esac
 STUB
 cat > bin/curl <<'STUB'
@@ -149,7 +150,8 @@ check "azure: --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/s
 check "azure: --public is refused before any az call" bash -c "! '$gs' --create --public '$t/src' https://dev.azure.com/org1/proj1/_git/pub && [[ ! -d '$t/azure/org1/proj1/_git/pub' ]] && ! grep -q -- '--repository pub\\|--name pub' '$t/az.log'"
 check "azure: a failing az is a FAIL, not a create" bash -c "! AZ_FAIL=1 '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azdown && [[ ! -d '$t/azure/org1/proj1/_git/azdown' ]] && ! grep -q 'repos create --name azdown' '$t/az.log'"
 check "azure: dry run does not claim a visibility" bash -c "'$gs' --create --dry-run '$t/src' https://dev.azure.com/org1/proj1/_git/dry2 | grep -q 'visibility: set by the project'"
-check "azure: percent-encoded characters other than %20 are decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/R%26D/_git/enc'; grep -q -- '--project R&D' '$t/az.log'"
+check "azure: percent-encoded characters other than %20 are decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/R%26D/_git/enc' && grep -q -- '--project R&D' '$t/az.log' && git -C '$t/azure/org1/R&D/_git/enc' show-ref --verify -q refs/heads/main"
+check "azure: a literal % in a name is passed to az unchanged" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/proj1/_git/100%' && grep -q -- '--name 100% ' '$t/az.log'"
 mkdir -p azure/org1/proj1/_git/azbroken
 check "azure: an existing unreadable repo is not recreated" bash -c "! '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azbroken && ! grep -q 'repos create --name azbroken' '$t/az.log'"
 check "azure: an empty --dst-token-env is refused" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/emptytok && ! grep -q 'repos create --name emptytok' '$t/az.log'"
