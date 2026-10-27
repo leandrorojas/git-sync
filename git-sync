@@ -69,13 +69,13 @@ parse_url() {
   url_path=${url_path#/}; url_path=${url_path%/}; url_path=${url_path%.git}
 }
 
-# gh_dst <gh args...>: run gh as the destination's token when one is set, else as gh's own login.
 gh_dst() {
-  ( if [[ -n ${DST_TOKEN_ENV:-} ]]; then export GH_TOKEN=${!DST_TOKEN_ENV:-}; fi; gh "$@" )
+  ( export GH_HOST=github.com
+    if [[ -n ${DST_TOKEN_ENV:-} ]]; then export GH_TOKEN=${!DST_TOKEN_ENV:-}; fi
+    gh "$@" </dev/null )
 }
 
-# create_github <owner/name> <check|create>: 0 ok (check: repo is missing), 1 failed, 2 repo already exists,
-# so a failed read of it is an access problem, not a missing repo.
+# Returns 2 when the repo already exists, so a failed git read of it is an access problem, not a missing repo.
 create_github() {
   command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
@@ -84,14 +84,13 @@ create_github() {
     return 1
   fi
   local err
-  if err=$(gh_dst repo view "$1" 2>&1 >/dev/null </dev/null); then return 2; fi
+  if err=$(gh_dst repo view "$1" 2>&1 >/dev/null); then return 2; fi
   [[ $err == *"Could not resolve to a Repository"* ]] ||
     { echo "gh could not check the repo (not logged in, bad token or no network)" >&2; return 1; }
   [[ $2 == check ]] && return 0
   gh_dst repo create "$1" "--$visibility" >/dev/null || return 1
 }
 
-# create_dest <dest-url> <check|create>: one case per supported host. An SSH alias is resolved to its real host.
 create_dest() {
   parse_url "$1"
   local host; host=$(ssh -G "$url_host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')

@@ -50,6 +50,7 @@ mkdir -p bin remotes; export GH_LOG=$t/gh.log GH_REMOTES=$t/remotes
 cat > bin/gh <<'STUB'
 #!/usr/bin/env bash
 echo "$@" >> "$GH_LOG"
+echo "gh-host:${GH_HOST:-}" >> "$GH_LOG.env"
 [[ -n ${GH_TOKEN:-} ]] && echo "gh-token-from:${GH_TOKEN}" >> "$GH_LOG.env"
 case "$1 $2" in
   "repo view") [[ -z ${GH_FAIL:-} ]] || { echo "HTTP 401: Bad credentials" >&2; exit 1; }
@@ -85,6 +86,9 @@ check "--create does not create when gh cannot check the repo" bash -c "! GH_FAI
 check "--create names the repo right for a .git/ URL" bash -c "'$gs' --create '$t/src' https://github.com/me/trailing.git/ && grep -q -- 'repo create me/trailing --private' '$t/gh.log'"
 check "--create names the repo right for a scp URL with a leading slash" bash -c "'$gs' --create '$t/src' git@github.com:/me/slashed.git && grep -q -- 'repo create me/slashed --private' '$t/gh.log'"
 check "--create refuses an empty --dst-token-env" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' git@github.com:me/notok.git && ! grep -q 'repo create me/notok' '$t/gh.log'"
+check "--create pins gh to github.com even when GH_HOST points elsewhere" bash -c "GH_HOST=ghe.corp.example '$gs' --create '$t/src' git@github.com:me/pinned.git && grep -q 'gh-host:github.com' '$t/gh.log.env' && ! grep -q 'ghe.corp.example' '$t/gh.log.env'"
+printf '%s git@github.com:me/pair1.git\n%s git@github.com:me/pair2.git dst_token_env=PAIR_TOK\n' "$t/src" "$t/src" > create-pairs.txt
+check "--create works from a pairs file, per-line token, and keeps reading the file" bash -c "PAIR_TOK=pairtok '$gs' --create -f '$t/create-pairs.txt' && git -C '$t/remotes/me/pair1.git' show-ref --verify -q refs/heads/main && git -C '$t/remotes/me/pair2.git' show-ref --verify -q refs/heads/main && grep -q 'gh-token-from:pairtok' '$t/gh.log.env'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
