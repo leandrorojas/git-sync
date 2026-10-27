@@ -11,6 +11,7 @@
 #   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
 #   user = HTTPS user name for git (default x-access-token; x-token-auth on bitbucket.org).
 #   dst_api_user = Bitbucket only: the account email, when the token is an API token; without it the token is a Bearer access token.
+#                  An API token also needs dst_user=x-bitbucket-api-token-auth (the name comes from third-party docs, unconfirmed).
 #
 # Options:
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
@@ -22,12 +23,12 @@
 #   --public    with --create, make the new repo public (refused on Azure DevOps, where the project sets it)
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
-# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} as defaults.
+# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} and GIT_SYNC_DST_API_USER as defaults.
 # Exit: 0 all pairs ok, 1 at least one pair failed, 2 bad usage.
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
@@ -203,6 +204,10 @@ create_bitbucket() {
   [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
     { echo "Bitbucket paths must be workspace/repo, using only letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required Bitbucket || return 1
+  if [[ -n ${DST_API_USER:-} && $DST_USER == x-token-auth ]]; then
+    echo "an API token (dst_api_user) also needs dst_user set to the git user name for API tokens; x-token-auth is only for access tokens" >&2
+    return 1
+  fi
   local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
   http_dst bitbucket_auth GET "$url"
   case $http_code in

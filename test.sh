@@ -200,7 +200,7 @@ GL_TOK=flaky check "gitlab: a failing project check fails the pair, also in a dr
 GL_TOK=gltok check "gitlab: a path that could break the JSON body is refused before any call" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' 'https://gitlab.com/me/x\",\"visibility\":\"public' && ! grep -q '\"name\":\"x' '$t/gl.log.req'"
 BB_TOK=bbtok check "bitbucket: --create makes a private repo with an access token" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/repo1.git && git -C '$t/bitbucket/ws/repo1.git' show-ref --verify -q refs/heads/main && grep -q '\"is_private\":true' '$t/gl.log.req' && grep -q '\"scm\":\"git\"' '$t/gl.log.req'"
 BB_TOK=bbtok check "bitbucket: --public sets is_private false" bash -c "'$gs' --create --public --dst-token-env BB_TOK '$t/src' git@bitbucket.org:ws/repo2.git && grep -q '\"is_private\":false' '$t/gl.log.req'"
-BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: dst_api_user sends the token as basic auth for that user" bash -c "'$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/repo3 && grep -q 'bb-cred-from:me:apppw repo:ws/repo3' '$t/gl.log.env'"
+BB_PW=apppw GIT_SYNC_DST_API_USER=me GIT_SYNC_DST_USER=x-bitbucket-api-token-auth check "bitbucket: dst_api_user sends the token as basic auth for that user" bash -c "'$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/repo3 && grep -q 'bb-cred-from:me:apppw repo:ws/repo3' '$t/gl.log.env'"
 BB_TOK=bbtok check "bitbucket: --dry-run creates nothing" bash -c "'$gs' --create --dry-run --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/dry && [[ ! -d '$t/bitbucket/ws/dry.git' ]]"
 check "bitbucket: no token configured is refused" bash -c "! '$gs' --create '$t/src' https://bitbucket.org/ws/notoken && [[ ! -d '$t/bitbucket/ws/notoken.git' ]]"
 BB_TOK=wrong check "bitbucket: a rejected token fails, also in a dry run" bash -c "! '$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/badtok && ! '$gs' --create --dry-run --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/badtok && [[ ! -d '$t/bitbucket/ws/badtok.git' ]]"
@@ -218,6 +218,9 @@ BB_TOK=bbtok GIT_ARGS_LOG=$t/ga1.log check "git gets x-token-auth for a Bitbucke
 GH_T=ghtok GIT_ARGS_LOG=$t/ga2.log check "git gets x-access-token for a GitHub destination" bash -c "PATH='$t/gitlog':\$PATH '$gs' --create --dst-token-env GH_T '$t/src' https://github.com/me/ulog2 && grep -q 'username=x-access-token' '$t/ga2.log' && ! grep -q 'username=x-token-auth' '$t/ga2.log'"
 printf '%s https://bitbucket.org/ws/ulog3 dst_token_env=BB_TOK dst_user=custom\n' "$t/src" > ulog-pairs.txt
 BB_TOK=bbtok GIT_ARGS_LOG=$t/ga3.log check "an explicit dst_user in a pairs file wins over the Bitbucket default" bash -c "PATH='$t/gitlog':\$PATH '$gs' --create -f '$t/ulog-pairs.txt' && grep -q 'username=custom' '$t/ga3.log' && ! grep -q 'username=x-token-auth' '$t/ga3.log'"
+BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: an API user with the default git user is refused before anything is created" bash -c "! '$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/apirefused && [[ ! -d '$t/bitbucket/ws/apirefused.git' ]] && ! grep -q 'repo:ws/apirefused' '$t/gl.log.env'"
+printf '%s https://bitbucket.org/ws/apipairs dst_token_env=BB_PW dst_api_user=me dst_user=x-bitbucket-api-token-auth\n' "$t/src" > api-pairs.txt
+BB_PW=apppw check "bitbucket: dst_api_user and dst_user work from a pairs file" bash -c "'$gs' --create -f '$t/api-pairs.txt' && grep -q 'bb-cred-from:me:apppw repo:ws/apipairs' '$t/gl.log.env'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@example.org:me/x.git"
 
 echo "$pass passed, $fail failed"
