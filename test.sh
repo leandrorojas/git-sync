@@ -83,14 +83,43 @@ case $cmd in
           [[ $proj == "${proj// /%20}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj// /%20}";;
 esac
 STUB
-chmod +x bin/gh bin/ssh bin/az; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=7 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+cat > bin/curl <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "$GL_LOG"
+url=; method=GET; tok=; data=
+while IFS= read -r line; do
+  case $line in
+    'url = "'*) url=${line#url = \"}; url=${url%\"};;
+    'request = "'*) method=${line#request = \"}; method=${method%\"};;
+    'header = "PRIVATE-TOKEN: '*) tok=${line#header = \"PRIVATE-TOKEN: }; tok=${tok%\"};;
+    'data = "'*) data=${line#data = \"}; data=${data%\"};;
+  esac
+done
+data=${data//\\\"/\"}
+echo "$method $url data:$data" >> "$GL_LOG.req"; echo "gl-token-from:$tok" >> "$GL_LOG.env"
+reply() { printf '%s\n%s' "$2" "$1"; exit 0; }
+[[ $tok == gltok ]] || reply 401 '{"message":"401 Unauthorized"}'
+path=${url#https://gitlab.com/api/v4}
+case "$method $path" in
+  "GET /projects/"*) enc=${path#/projects/}; [[ -d $GL_REMOTES/${enc//%2F//}.git ]] && reply 200 '{"id":7}' || reply 404 '{"message":"404 Project Not Found"}';;
+  "GET /namespaces/"*) case ${path#/namespaces/} in me) reply 200 '{"id":42,"name":"me"}';; group%2Fsub) reply 200 '{"id":44,"name":"sub"}';; *) reply 404 '{}';; esac;;
+  "POST /projects")
+    name=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' <<<"$data"); nsid=$(sed -n 's/.*"namespace_id":\([0-9]*\).*/\1/p' <<<"$data")
+    case $nsid in 42) ns=me;; 44) ns=group/sub;; *) reply 400 '{}';; esac
+    git init -q --bare "$GL_REMOTES/$ns/$name.git"; reply 201 '{"id":8}';;
+esac
+reply 404 '{}'
+STUB
+chmod +x bin/gh bin/ssh bin/az bin/curl; export GL_LOG=$t/gl.log GL_REMOTES=$t/gitlab; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
+export GIT_CONFIG_COUNT=9 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
   GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
   GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
   GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
   GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:" \
   GIT_CONFIG_KEY_5="url.$t/azure/.insteadOf" GIT_CONFIG_VALUE_5="https://dev.azure.com/" \
-  GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/"
+  GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/" \
+  GIT_CONFIG_KEY_7="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_7="https://gitlab.com/" \
+  GIT_CONFIG_KEY_8="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_8="git@gitlab.com:"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -119,6 +148,16 @@ check "azure: --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/s
 check "azure: --public is refused" bash -c "! '$gs' --create --public '$t/src' https://dev.azure.com/org1/proj1/_git/pub && [[ ! -d '$t/azure/org1/proj1/_git/pub' ]]"
 check "azure: a failing az is a FAIL, not a create" bash -c "! AZ_FAIL=1 '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azdown && [[ ! -d '$t/azure/org1/proj1/_git/azdown' ]]"
 AZ_TOK=aztok check "azure: PAT reaches az through the environment, not argv" bash -c "'$gs' --create --dst-token-env AZ_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/withpat && grep -q 'az-pat-from:aztok' '$t/az.log.env' && ! grep -q aztok '$t/az.log'"
+GL_TOK=gltok check "gitlab: --create makes a private project in a user namespace" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj1.git && git -C '$t/gitlab/me/proj1.git' show-ref --verify -q refs/heads/main && grep -q '\"visibility\":\"private\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: nested group path from an scp URL" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' git@gitlab.com:group/sub/proj2.git && git -C '$t/gitlab/group/sub/proj2.git' show-ref --verify -q refs/heads/main"
+GL_TOK=gltok check "gitlab: --public sets visibility public" bash -c "'$gs' --create --public --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj3 && grep -q '\"visibility\":\"public\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: --dry-run creates nothing" bash -c "'$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/dry && [[ ! -d '$t/gitlab/me/dry.git' ]] && ! grep -q '\"path\":\"dry\"' '$t/gl.log.req'"
+check "gitlab: no token configured is refused" bash -c "! '$gs' --create '$t/src' https://gitlab.com/me/notoken && [[ ! -d '$t/gitlab/me/notoken.git' ]]"
+GL_TOK=wrong check "gitlab: a rejected token fails, also in a dry run" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/badtok && ! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/badtok && [[ ! -d '$t/gitlab/me/badtok.git' ]]"
+GL_TOK=gltok check "gitlab: unknown group fails without creating" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/nogroup/proj4 && [[ ! -d '$t/gitlab/nogroup' ]]"
+mkdir -p gitlab/me/broken.git
+GL_TOK=gltok check "gitlab: an existing unreadable project is not recreated" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/broken && ! grep -q '\"path\":\"broken\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj5 && grep -q 'gl-token-from:gltok' '$t/gl.log.env' && ! grep -q gltok '$t/gl.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
