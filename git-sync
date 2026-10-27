@@ -148,6 +148,8 @@ http_dst() {
   [[ $http_code =~ ^[0-9]{3}$ ]] || { http_code=000; http_body=; }
 }
 
+need_curl() { command -v curl >/dev/null || { echo "curl is not installed" >&2; return 1; }; }
+
 dst_token_required() {
   [[ -n ${DST_TOKEN_ENV:-} && -n ${!DST_TOKEN_ENV:-} ]] ||
     { echo "--create on $1 needs a token: set --dst-token-env (or dst_token_env=) to a variable holding one" >&2; return 1; }
@@ -158,7 +160,7 @@ gitlab_auth() { printf 'header = "PRIVATE-TOKEN: %s"\n' "${!DST_TOKEN_ENV}"; }
 # Same contract as create_github. Needs a token with the api scope in the DST_TOKEN_ENV variable.
 create_gitlab() {
   [[ $1 == */* ]] || { echo "cannot read group/project from the URL" >&2; return 1; }
-  dst_token_required GitLab || return 1
+  need_curl && dst_token_required GitLab || return 1
   local api=https://gitlab.com/api/v4 ns=${1%/*} name=${1##*/}
   http_dst gitlab_auth GET "$api/projects/${1//\//%2F}"
   case $http_code in
@@ -166,11 +168,14 @@ create_gitlab() {
     404) ;;
     *) echo "GitLab answered $http_code when checking the repo (bad token, missing scope or no network)" >&2; return 1;;
   esac
-  [[ $2 == check ]] && return 0
   http_dst gitlab_auth GET "$api/namespaces/${ns//\//%2F}"
-  local nsid; nsid=$(printf '%s' "$http_body" | sed -n 's/^{"id":\([0-9][0-9]*\).*/\1/p')
-  [[ $http_code == 200 && -n $nsid ]] || { echo "GitLab group or user '$ns' not found or not visible to the token" >&2; return 1; }
+  local nsid; nsid=$(printf '%s' "$http_body" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+  [[ $http_code == 200 && -n $nsid ]] ||
+    { echo "GitLab group or user '$ns' not found or not visible to the token (HTTP $http_code)" >&2; return 1; }
+  [[ $2 == check ]] && return 0
   http_dst gitlab_auth POST "$api/projects" "{\"name\":\"$name\",\"path\":\"$name\",\"namespace_id\":$nsid,\"visibility\":\"$visibility\"}"
+  [[ $http_body != *"has already been taken"* ]] ||
+    { echo "GitLab says the project already exists; the token just cannot see it" >&2; return 1; }
   [[ $http_code == 201 ]] || { echo "GitLab answered $http_code when creating the repo" >&2; return 1; }
 }
 
@@ -184,7 +189,7 @@ bitbucket_auth() {
 # Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
 create_bitbucket() {
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read workspace/repo from the URL" >&2; return 1; }
-  dst_token_required Bitbucket || return 1
+  need_curl && dst_token_required Bitbucket || return 1
   local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
   http_dst bitbucket_auth GET "$url"
   case $http_code in
@@ -204,7 +209,7 @@ create_dest() {
   case ${host:-$url_host} in
     github.com|ssh.github.com) create_github "$url_path" "$2";;
     dev.azure.com|ssh.dev.azure.com) create_azure "$url_path" "$2";;
-    gitlab.com) create_gitlab "$url_path" "$2";;
+    gitlab.com|altssh.gitlab.com) create_gitlab "$url_path" "$2";;
     bitbucket.org) create_bitbucket "$url_path" "$2";;
     *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac

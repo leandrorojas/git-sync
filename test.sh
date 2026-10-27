@@ -61,7 +61,7 @@ STUB
 cat > bin/ssh <<'STUB'
 #!/usr/bin/env bash
 [[ $1 == -G ]] || exit 1
-[[ $2 == gh-alias ]] && echo "hostname github.com" || echo "hostname $2"
+case $2 in gh-alias) echo "hostname github.com";; gl-alt) echo "hostname altssh.gitlab.com";; *) echo "hostname $2";; esac
 STUB
 cat > bin/az <<'STUB'
 #!/usr/bin/env bash
@@ -118,13 +118,14 @@ case "$method $path" in
   "GET /namespaces/"*) case ${path#/namespaces/} in me) reply 200 '{"id":42,"name":"me"}';; group%2Fsub) reply 200 '{"id":44,"name":"sub"}';; *) reply 404 '{}';; esac;;
   "POST /projects")
     name=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' <<<"$data"); nsid=$(sed -n 's/.*"namespace_id":\([0-9]*\).*/\1/p' <<<"$data")
+    [[ $name != hidden ]] || reply 400 '{"message":{"name":["has already been taken"],"path":["has already been taken"]}}'
     case $nsid in 42) ns=me;; 44) ns=group/sub;; *) reply 400 '{}';; esac
     git init -q --bare "$GL_REMOTES/$ns/$name.git"; reply 201 '{"id":8}';;
 esac
 reply 404 '{}'
 STUB
 chmod +x bin/gh bin/ssh bin/az bin/curl; export GL_LOG=$t/gl.log GL_REMOTES=$t/gitlab BB_REMOTES=$t/bitbucket; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=11 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+export GIT_CONFIG_COUNT=12 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
   GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@example.org:" \
   GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
   GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
@@ -134,7 +135,8 @@ export GIT_CONFIG_COUNT=11 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONF
   GIT_CONFIG_KEY_7="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_7="https://gitlab.com/" \
   GIT_CONFIG_KEY_8="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_8="git@gitlab.com:" \
   GIT_CONFIG_KEY_9="url.$t/bitbucket/.insteadOf" GIT_CONFIG_VALUE_9="https://bitbucket.org/" \
-  GIT_CONFIG_KEY_10="url.$t/bitbucket/.insteadOf" GIT_CONFIG_VALUE_10="git@bitbucket.org:"
+  GIT_CONFIG_KEY_10="url.$t/bitbucket/.insteadOf" GIT_CONFIG_VALUE_10="git@bitbucket.org:" \
+  GIT_CONFIG_KEY_11="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_11="git@gl-alt:"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -181,6 +183,9 @@ GL_TOK=gltok check "gitlab: unknown group fails without creating" bash -c "! '$g
 mkdir -p gitlab/me/broken.git
 GL_TOK=gltok check "gitlab: an existing unreadable project is not recreated" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/broken && ! grep -q '\"path\":\"broken\"' '$t/gl.log.req'"
 GL_TOK=gltok check "gitlab: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj5 && grep -q 'gl-token-from:gltok' '$t/gl.log.env' && ! grep -q gltok '$t/gl.log'"
+GL_TOK=gltok check "gitlab: a dry run also checks the group exists" bash -c "! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/nogroup/dry3"
+GL_TOK=gltok check "gitlab: an invisible existing project gets a clear message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/hidden 2>&1 | grep -q 'token just cannot see it'"
+GL_TOK=gltok check "gitlab: altssh.gitlab.com resolves to gitlab" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' git@gl-alt:me/viaalt.git && [[ -d '$t/gitlab/me/viaalt.git' ]]"
 BB_TOK=bbtok check "bitbucket: --create makes a private repo with an access token" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/repo1.git && git -C '$t/bitbucket/ws/repo1.git' show-ref --verify -q refs/heads/main && grep -q '\"is_private\":true' '$t/gl.log.req' && grep -q '\"scm\":\"git\"' '$t/gl.log.req'"
 BB_TOK=bbtok check "bitbucket: --public sets is_private false" bash -c "'$gs' --create --public --dst-token-env BB_TOK '$t/src' git@bitbucket.org:ws/repo2.git && grep -q '\"is_private\":false' '$t/gl.log.req'"
 BB_PW=apppw GIT_SYNC_DST_USER=me check "bitbucket: dst_user switches to an app password" bash -c "'$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/repo3 && grep -q 'bb-cred-from:me:apppw' '$t/gl.log.env'"
