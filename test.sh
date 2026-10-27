@@ -101,10 +101,11 @@ done
 data=${data//\\\"/\"}
 echo "$method $url data:$data" >> "$GL_LOG.req"; echo "gl-token-from:$tok" >> "$GL_LOG.env"
 reply() { printf '%s\n%s' "$2" "$1"; exit 0; }
-[[ $tok == gltok || $tok == readonly ]] || reply 401 '{"message":"401 Unauthorized"}'
+[[ $tok == gltok || $tok == readonly || $tok == flaky ]] || reply 401 '{"message":"401 Unauthorized"}'
 path=${url#https://gitlab.com/api/v4}
 case "$method $path" in
-  "GET /projects/"*) enc=${path#/projects/}; [[ -d $GL_REMOTES/${enc//%2F//}.git ]] && reply 200 '{"id":7}' || reply 404 '{"message":"404 Project Not Found"}';;
+  "GET /projects/"*) [[ $tok != flaky ]] || reply 500 '{"message":"500 Internal Server Error"}'
+                     enc=${path#/projects/}; [[ -d $GL_REMOTES/${enc//%2F//}.git ]] && reply 200 '{"id":7}' || reply 404 '{"message":"404 Project Not Found"}';;
   "GET /namespaces/"*) case ${path#/namespaces/} in me) reply 200 '{"id":42,"name":"me"}';; group%2Fsub) reply 200 '{"id":44,"name":"sub"}';; *) reply 404 '{}';; esac;;
   "POST /projects")
     [[ $tok != readonly ]] || reply 403 '{"message":"403 Forbidden - Your token has not enough scopes"}'
@@ -179,6 +180,7 @@ GL_TOK=readonly check "gitlab: a refused create shows GitLab's own message" bash
 GL_TOK=gltok check "gitlab: no network is reported as unreachable, not as an HTTP status" bash -c "GL_NET_DOWN=1 '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/down 2>&1 | grep -q 'could not reach GitLab'"
 printf '%s https://gitlab.com/me/frompairs dst_token_env=GL_PAIR_TOK\n' "$t/src" > gl-pairs.txt
 check "gitlab: the token comes from dst_token_env= in a pairs file" bash -c "GL_PAIR_TOK=gltok '$gs' --create -f '$t/gl-pairs.txt' && [[ -d '$t/gitlab/me/frompairs.git' ]]"
+GL_TOK=flaky check "gitlab: a failing project check fails the pair, also in a dry run" bash -c "! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/flaky1 && ! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/flaky1 && [[ ! -d '$t/gitlab/me/flaky1.git' ]]"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"

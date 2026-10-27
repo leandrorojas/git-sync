@@ -173,7 +173,7 @@ create_gitlab() {
   case $http_code in
     200) return 2;;
     404) ;;
-    *) http_fail GitLab "checking the repo (bad token, missing scope or no network)";;
+    *) http_fail GitLab "checking the repo (bad token, missing scope or no network)"; return 1;;
   esac
   http_dst gitlab_auth GET "$api/namespaces/${ns//\//%2F}"
   local nsid; nsid=$(printf '%s' "$http_body" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
