@@ -61,7 +61,7 @@ STUB
 cat > bin/ssh <<'STUB'
 #!/usr/bin/env bash
 [[ $1 == -G ]] || exit 1
-[[ $2 == gh-alias ]] && echo "hostname github.com" || echo "hostname $2"
+case $2 in gh-alias) echo "hostname github.com";; gl-alt) echo "hostname altssh.gitlab.com";; *) echo "hostname $2";; esac
 STUB
 cat > bin/az <<'STUB'
 #!/usr/bin/env bash
@@ -85,14 +85,48 @@ case $cmd in
           [[ $proj == "${proj//&/%26}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj//&/%26}";;
 esac
 STUB
-chmod +x bin/gh bin/ssh bin/az; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=7 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+cat > bin/curl <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "$GL_LOG"
+[[ -z ${GL_NET_DOWN:-} ]] || exit 7
+url=; method=GET; tok=; data=
+while IFS= read -r line; do
+  case $line in
+    'url = "'*) url=${line#url = \"}; url=${url%\"};;
+    'request = "'*) method=${line#request = \"}; method=${method%\"};;
+    'header = "PRIVATE-TOKEN: '*) tok=${line#header = \"PRIVATE-TOKEN: }; tok=${tok%\"};;
+    'data = "'*) data=${line#data = \"}; data=${data%\"};;
+  esac
+done
+data=${data//\\\"/\"}
+echo "$method $url data:$data" >> "$GL_LOG.req"; echo "gl-token-from:$tok" >> "$GL_LOG.env"
+reply() { printf '%s\n%s' "$2" "$1"; exit 0; }
+[[ $tok == gltok || $tok == readonly || $tok == flaky ]] || reply 401 '{"message":"401 Unauthorized"}'
+path=${url#https://gitlab.com/api/v4}
+case "$method $path" in
+  "GET /projects/"*) [[ $tok != flaky ]] || reply 500 '{"message":"500 Internal Server Error"}'
+                     enc=${path#/projects/}; [[ -d $GL_REMOTES/${enc//%2F//}.git ]] && reply 200 '{"id":7}' || reply 404 '{"message":"404 Project Not Found"}';;
+  "GET /namespaces/"*) case ${path#/namespaces/} in me) reply 200 '{"id":42,"name":"me"}';; group%2Fsub) reply 200 '{"id":44,"name":"sub"}';; *) reply 404 '{}';; esac;;
+  "POST /projects")
+    [[ $tok != readonly ]] || reply 403 '{"message":"403 Forbidden - Your token has not enough scopes"}'
+    name=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' <<<"$data"); nsid=$(sed -n 's/.*"namespace_id":\([0-9]*\).*/\1/p' <<<"$data")
+    [[ $name != hidden ]] || reply 400 '{"message":{"name":["has already been taken"],"path":["has already been taken"]}}'
+    case $nsid in 42) ns=me;; 44) ns=group/sub;; *) reply 400 '{}';; esac
+    git init -q --bare "$GL_REMOTES/$ns/$name.git"; reply 201 '{"id":8}';;
+esac
+reply 404 '{}'
+STUB
+chmod +x bin/gh bin/ssh bin/az bin/curl; export GL_LOG=$t/gl.log GL_REMOTES=$t/gitlab; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
+export GIT_CONFIG_COUNT=10 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
   GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
   GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
   GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
   GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:" \
   GIT_CONFIG_KEY_5="url.$t/azure/.insteadOf" GIT_CONFIG_VALUE_5="https://dev.azure.com/" \
-  GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/"
+  GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/" \
+  GIT_CONFIG_KEY_7="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_7="https://gitlab.com/" \
+  GIT_CONFIG_KEY_8="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_8="git@gitlab.com:" \
+  GIT_CONFIG_KEY_9="url.$t/gitlab/.insteadOf" GIT_CONFIG_VALUE_9="git@gl-alt:"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -129,6 +163,25 @@ check "azure: an empty --dst-token-env is refused" bash -c "! env -u NO_SUCH_TOK
 check "azure: a legacy visualstudio.com URL is reported as unsupported" bash -c "! '$gs' --create '$t/src' https://org1.visualstudio.com/proj1/_git/legacy"
 check "azure: a missing project says to create the project first" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/noproj/_git/r 2>&1 | grep -q 'project must exist already'"
 AZ_TOK=aztok check "azure: PAT reaches az through the environment, not argv" bash -c "'$gs' --create --dst-token-env AZ_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/withpat && grep -q 'az-pat-from:aztok' '$t/az.log.env' && ! grep -q aztok '$t/az.log'"
+GL_TOK=gltok check "gitlab: --create makes a private project in a user namespace" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj1.git && git -C '$t/gitlab/me/proj1.git' show-ref --verify -q refs/heads/main && grep -q '\"visibility\":\"private\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: nested group path from an scp URL" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' git@gitlab.com:group/sub/proj2.git && git -C '$t/gitlab/group/sub/proj2.git' show-ref --verify -q refs/heads/main"
+GL_TOK=gltok check "gitlab: --public sets visibility public" bash -c "'$gs' --create --public --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj3 && grep -q '\"visibility\":\"public\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: --dry-run creates nothing" bash -c "'$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/dry && [[ ! -d '$t/gitlab/me/dry.git' ]] && ! grep -q '\"path\":\"dry\"' '$t/gl.log.req'"
+check "gitlab: no token configured is refused" bash -c "! '$gs' --create '$t/src' https://gitlab.com/me/notoken && [[ ! -d '$t/gitlab/me/notoken.git' ]]"
+GL_TOK=wrong check "gitlab: a rejected token fails, also in a dry run" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/badtok && ! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/badtok && [[ ! -d '$t/gitlab/me/badtok.git' ]]"
+GL_TOK=gltok check "gitlab: unknown group fails without creating" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/nogroup/proj4 && [[ ! -d '$t/gitlab/nogroup' ]]"
+mkdir -p gitlab/me/broken.git
+GL_TOK=gltok check "gitlab: an existing unreadable project is not recreated" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/broken && ! grep -q '\"path\":\"broken\"' '$t/gl.log.req'"
+GL_TOK=gltok check "gitlab: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj5 && grep -q 'gl-token-from:gltok' '$t/gl.log.env' && ! grep -q gltok '$t/gl.log'"
+GL_TOK=gltok check "gitlab: a dry run also checks the group exists" bash -c "! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/nogroup/dry3"
+GL_TOK=gltok check "gitlab: an invisible existing project gets a clear message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/hidden 2>&1 | grep -q 'already taken'"
+GL_TOK=gltok check "gitlab: altssh.gitlab.com resolves to gitlab" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' git@gl-alt:me/viaalt.git && [[ -d '$t/gitlab/me/viaalt.git' ]]"
+GL_TOK=readonly check "gitlab: a refused create shows GitLab's own message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/ro 2>&1 | grep -q 'not enough scopes'"
+GL_TOK=gltok check "gitlab: no network is reported as unreachable, not as an HTTP status" bash -c "GL_NET_DOWN=1 '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/down 2>&1 | grep -q 'could not reach GitLab'"
+printf '%s https://gitlab.com/me/frompairs dst_token_env=GL_PAIR_TOK\n' "$t/src" > gl-pairs.txt
+check "gitlab: the token comes from dst_token_env= in a pairs file" bash -c "GL_PAIR_TOK=gltok '$gs' --create -f '$t/gl-pairs.txt' && [[ -d '$t/gitlab/me/frompairs.git' ]]"
+GL_TOK=flaky check "gitlab: a failing project check fails the pair, also in a dry run" bash -c "! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/flaky1 && ! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/flaky1 && [[ ! -d '$t/gitlab/me/flaky1.git' ]]"
+GL_TOK=gltok check "gitlab: a path that could break the JSON body is refused before any call" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' 'https://gitlab.com/me/x\",\"visibility\":\"public' && ! grep -q '\"name\":\"x' '$t/gl.log.req'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
