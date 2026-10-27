@@ -63,12 +63,36 @@ cat > bin/ssh <<'STUB'
 [[ $1 == -G ]] || exit 1
 [[ $2 == gh-alias ]] && echo "hostname github.com" || echo "hostname $2"
 STUB
-chmod +x bin/gh bin/ssh; export PATH=$t/bin:$PATH
-export GIT_CONFIG_COUNT=5 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+cat > bin/az <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "$AZ_LOG"
+[[ -n ${AZURE_DEVOPS_EXT_PAT:-} ]] && echo "az-pat-from:${AZURE_DEVOPS_EXT_PAT}" >> "$AZ_LOG.env"
+[[ -z ${AZ_FAIL:-} ]] || { echo "Please run 'az login' to setup account." >&2; exit 1; }
+[[ $* != *"--project noproj"* ]] || { echo "TF200016: The following project does not exist: noproj." >&2; exit 1; }
+shift; cmd=$1; shift
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --repository|--name) repo=$2;; --project) proj=$2;; --organization) org=${2##*/};;
+  esac; shift
+done
+case $cmd in
+  show) [[ -d $AZ_REMOTES/$org/$proj/_git/$repo ]] ||
+          { echo "TF401019: The Git repository with name or identifier $repo does not exist or you do not have permissions for the operation you are attempting." >&2; exit 1; };;
+  create) git init -q --bare "$AZ_REMOTES/$org/$proj/_git/$repo"
+          mkdir -p "$AZ_REMOTES_SSH/$org/$proj"; ln -s "$AZ_REMOTES/$org/$proj/_git/$repo" "$AZ_REMOTES_SSH/$org/$proj/$repo"
+          [[ $proj != "$repo" ]] || ln -sfn "$AZ_REMOTES/$org/$proj/_git" "$AZ_REMOTES/$org/_git"
+          [[ $proj == "${proj// /%20}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj// /%20}"
+          [[ $proj == "${proj//&/%26}" ]] || ln -sfn "$AZ_REMOTES/$org/$proj" "$AZ_REMOTES/$org/${proj//&/%26}";;
+esac
+STUB
+chmod +x bin/gh bin/ssh bin/az; export AZ_LOG=$t/az.log AZ_REMOTES=$t/azure AZ_REMOTES_SSH=$t/azure-ssh; export PATH=$t/bin:$PATH
+export GIT_CONFIG_COUNT=7 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
   GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
   GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/" \
   GIT_CONFIG_KEY_3="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_3="ssh://git@github.com:22/" \
-  GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:"
+  GIT_CONFIG_KEY_4="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_4="git@gh-alias:" \
+  GIT_CONFIG_KEY_5="url.$t/azure/.insteadOf" GIT_CONFIG_VALUE_5="https://dev.azure.com/" \
+  GIT_CONFIG_KEY_6="url.$t/azure-ssh/.insteadOf" GIT_CONFIG_VALUE_6="git@ssh.dev.azure.com:v3/"
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
@@ -89,6 +113,22 @@ check "--create refuses an empty --dst-token-env" bash -c "! env -u NO_SUCH_TOK 
 check "--create pins gh to github.com even when GH_HOST points elsewhere" bash -c "GH_HOST=ghe.corp.example '$gs' --create '$t/src' git@github.com:me/pinned.git && grep -q 'gh-host:github.com' '$t/gh.log.env' && ! grep -q 'ghe.corp.example' '$t/gh.log.env'"
 printf '%s git@github.com:me/pair1.git\n%s git@github.com:me/pair2.git dst_token_env=PAIR_TOK\n' "$t/src" "$t/src" > create-pairs.txt
 check "--create works from a pairs file, per-line token, and keeps reading the file" bash -c "PAIR_TOK=pairtok '$gs' --create -f '$t/create-pairs.txt' && git -C '$t/remotes/me/pair1.git' show-ref --verify -q refs/heads/main && git -C '$t/remotes/me/pair2.git' show-ref --verify -q refs/heads/main && grep -q 'gh-token-from:pairtok' '$t/gh.log.env'"
+check "azure: --create makes the repo from an https URL" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/repo1 && git -C '$t/azure/org1/proj1/_git/repo1' show-ref --verify -q refs/heads/main && grep -q -- '--organization https://dev.azure.com/org1' '$t/az.log'"
+check "azure: --create makes the repo from an ssh v3 URL" bash -c "'$gs' --create '$t/src' git@ssh.dev.azure.com:v3/org1/proj1/repo2 && git -C '$t/azure/org1/proj1/_git/repo2' show-ref --verify -q refs/heads/main"
+check "azure: org/_git/repo URL uses the repo name as the project" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/_git/solo && [[ -d '$t/azure/org1/solo/_git/solo' ]]"
+check "azure: project name with %20 is decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/my%20proj/_git/spaced' && grep -q -- '--project my proj' '$t/az.log'"
+check "azure: --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/src' https://dev.azure.com/org1/proj1/_git/dry && [[ ! -d '$t/azure/org1/proj1/_git/dry' ]] && ! grep -q 'repos create --name dry' '$t/az.log'"
+check "azure: --public is refused before any az call" bash -c "! '$gs' --create --public '$t/src' https://dev.azure.com/org1/proj1/_git/pub && [[ ! -d '$t/azure/org1/proj1/_git/pub' ]] && ! grep -q -- '--repository pub\\|--name pub' '$t/az.log'"
+check "azure: a failing az is a FAIL, not a create" bash -c "! AZ_FAIL=1 '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azdown && [[ ! -d '$t/azure/org1/proj1/_git/azdown' ]] && ! grep -q 'repos create --name azdown' '$t/az.log'"
+check "azure: dry run does not claim a visibility" bash -c "'$gs' --create --dry-run '$t/src' https://dev.azure.com/org1/proj1/_git/dry2 | grep -q 'visibility: set by the project'"
+check "azure: percent-encoded characters other than %20 are decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/R%26D/_git/enc' && grep -q -- '--project R&D' '$t/az.log' && git -C '$t/azure/org1/R&D/_git/enc' show-ref --verify -q refs/heads/main"
+check "azure: a literal % in a name is passed to az unchanged" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/proj1/_git/100%' && grep -q -- '--name 100% ' '$t/az.log'"
+mkdir -p azure/org1/proj1/_git/azbroken
+check "azure: an existing unreadable repo is not recreated" bash -c "! '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azbroken && ! grep -q 'repos create --name azbroken' '$t/az.log'"
+check "azure: an empty --dst-token-env is refused" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/emptytok && ! grep -q 'repos create --name emptytok' '$t/az.log'"
+check "azure: a legacy visualstudio.com URL is reported as unsupported" bash -c "! '$gs' --create '$t/src' https://org1.visualstudio.com/proj1/_git/legacy"
+check "azure: a missing project says to create the project first" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/noproj/_git/r 2>&1 | grep -q 'project must exist already'"
+AZ_TOK=aztok check "azure: PAT reaches az through the environment, not argv" bash -c "'$gs' --create --dst-token-env AZ_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/withpat && grep -q 'az-pat-from:aztok' '$t/az.log.env' && ! grep -q aztok '$t/az.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
