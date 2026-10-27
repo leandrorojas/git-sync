@@ -14,6 +14,8 @@
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
+#   --create    create the destination repo if it doesn't exist (private); GitHub only for now, via `gh`
+#   --public    with --create, make the new repo public
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
 # Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} as defaults.
@@ -21,15 +23,15 @@
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-dry=0; force=0; prune=0; file=
+dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
 D_SRC_USER=${GIT_SYNC_SRC_USER:-x-access-token}; D_DST_USER=${GIT_SYNC_DST_USER:-x-access-token}
 while [[ ${1:-} == -* ]]; do
   case $1 in
-    --dry-run) dry=1;; --force) force=1;; --prune) prune=1;;
+    --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --create) create=1;; --public) visibility=public;;
     -f) file=${2:-}; shift;;
     --src-key) D_SRC_KEY=${2:-}; shift;; --dst-key) D_DST_KEY=${2:-}; shift;;
     --src-token-env) D_SRC_TOKEN_ENV=${2:-}; shift;; --dst-token-env) D_DST_TOKEN_ENV=${2:-}; shift;;
@@ -56,6 +58,34 @@ gitc() {
   fi
 }
 
+# parse_url <url>: sets url_host and url_path (owner/name) for ssh, scp-style and https URLs.
+parse_url() {
+  local u=$1
+  if [[ $u == *://* ]]; then
+    u=${u#*://}; u=${u#*@}; url_host=${u%%/*}; url_path=${u#*/}
+  else
+    u=${u#*@}; url_host=${u%%:*}; url_path=${u#*:}
+  fi
+  url_path=${url_path%.git}; url_path=${url_path%/}
+}
+
+# create_github <owner/name>: 0 created, 1 failed, 2 already exists (so the read failure is access, not a missing repo).
+create_github() {
+  command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
+  [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
+  if gh repo view "$1" >/dev/null 2>&1; then return 2; fi
+  gh repo create "$1" "--$visibility" >/dev/null
+}
+
+# create_dest <dest-url>: create the destination repo on the host that serves it. One case per supported host.
+create_dest() {
+  parse_url "$1"
+  case $url_host in
+    github.com) create_github "$url_path";;
+    *) echo "--create does not support host '$url_host' yet" >&2; return 1;;
+  esac
+}
+
 # refs <SRC|DST> <url>: sorted "sha ref" lines for heads and tags, without peeled entries.
 refs() {
   local out; out=$(gitc "$1" ls-remote --heads --tags "$2") || return 1
@@ -74,7 +104,17 @@ sync_one() {
   srcrefs=$(refs SRC "$src") || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
   [[ -n $(printf '%s\n' "$srcrefs" | grep 'refs/heads/') ]] ||
     { echo "FAIL $name: source has no branches; refusing to continue" >&2; return 1; }
-  dstrefs=$(refs DST "$dst") || { echo "FAIL $name: cannot read destination (auth, URL or repo missing)" >&2; return 1; }
+  if ! dstrefs=$(refs DST "$dst"); then
+    if (( create )); then
+      if (( dry )); then echo "ok   $name (dry run: destination missing, would create it as $visibility)"; return 0; fi
+      create_dest "$dst"; local rc=$?
+      (( rc == 2 )) && { echo "FAIL $name: destination exists but cannot be read (auth)" >&2; return 1; }
+      (( rc == 0 )) || { echo "FAIL $name: could not create destination" >&2; return 1; }
+      dstrefs=$(refs DST "$dst") || { echo "FAIL $name: created destination but cannot read it (auth)" >&2; return 1; }
+    else
+      echo "FAIL $name: cannot read destination (auth, URL or repo missing; --create makes a missing one)" >&2; return 1
+    fi
+  fi
   if (( first && force == 0 )) && [[ -n $dstrefs ]]; then
     echo "FAIL $name: destination already has refs and this pair was never synced here; rerun with --force to adopt it" >&2
     return 1

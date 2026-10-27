@@ -45,5 +45,29 @@ printf '# comment\n\n%s %s\n%s\n%s %s bogus=1\n' "$t/src" "$t/other.git" "$t/src
 check "pairs file: bad lines fail the run" bash -c "! '$gs' -f '$t/pairs.txt'"
 check "pairs file: good line still synced" bash -c "git -C '$t/other.git' show-ref --verify -q refs/heads/main"
 
+# --create, with a stub gh and github.com/bitbucket.org URLs rewritten to local folders
+mkdir -p bin remotes; export GH_LOG=$t/gh.log GH_REMOTES=$t/remotes
+cat > bin/gh <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "$GH_LOG"
+case "$1 $2" in
+  "repo view") [[ -d $GH_REMOTES/$3.git ]];;
+  "repo create") git init -q --bare "$GH_REMOTES/$3.git";;
+esac
+STUB
+chmod +x bin/gh; export PATH=$t/bin:$PATH
+export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:" \
+  GIT_CONFIG_KEY_1="url.$t/nowhere/.insteadOf" GIT_CONFIG_VALUE_1="git@bitbucket.org:" \
+  GIT_CONFIG_KEY_2="url.$t/remotes/.insteadOf" GIT_CONFIG_VALUE_2="https://github.com/"
+/bin/rm -rf "${GIT_SYNC_DIR:?}"
+
+check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
+check "--create --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/src' git@github.com:me/new.git && [[ ! -d '$t/remotes/me/new.git' ]]"
+check "--create makes a private repo and syncs it" bash -c "'$gs' --create '$t/src' git@github.com:me/new.git && grep -q -- '--private' '$t/gh.log' && git -C '$t/remotes/me/new.git' show-ref --verify -q refs/heads/main"
+check "--create --public makes a public repo" bash -c "'$gs' --create --public '$t/src' https://github.com/me/pub.git && grep -q -- '--public' '$t/gh.log'"
+mkdir -p remotes/me/broken.git
+check "--create does not recreate an existing unreadable repo" bash -c "! '$gs' --create '$t/src' git@github.com:me/broken.git && ! grep -q 'repo create me/broken' '$t/gh.log'"
+check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
+
 echo "$pass passed, $fail failed"
 exit $((fail > 0))
