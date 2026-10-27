@@ -15,7 +15,7 @@
 #               (with --create and a missing destination it only checks that the repo can be created)
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
-#   --create    create the destination repo if it doesn't exist (private); GitHub only for now, via `gh`
+#   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`
 #   --public    with --create, make the new repo public
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
@@ -75,14 +75,18 @@ gh_dst() {
     gh "$@" </dev/null )
 }
 
+dst_token_ok() {
+  if [[ -n ${DST_TOKEN_ENV:-} && -z ${!DST_TOKEN_ENV:-} ]]; then
+    echo "env var $DST_TOKEN_ENV is empty; the CLI would fall back to its own login and could create the repo in the wrong account" >&2
+    return 1
+  fi
+}
+
 # Returns 2 when the repo already exists, so a failed git read of it is an access problem, not a missing repo.
 create_github() {
   command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
-  if [[ -n ${DST_TOKEN_ENV:-} && -z ${!DST_TOKEN_ENV:-} ]]; then
-    echo "env var $DST_TOKEN_ENV is empty; gh would fall back to its own login and could create the repo in the wrong account" >&2
-    return 1
-  fi
+  dst_token_ok || return 1
   local err
   if err=$(gh_dst repo view "$1" 2>&1 >/dev/null); then return 2; fi
   [[ $err == *"Could not resolve to a Repository"* ]] ||
@@ -91,11 +95,37 @@ create_github() {
   gh_dst repo create "$1" "--$visibility" >/dev/null || return 1
 }
 
+az_dst() {
+  ( if [[ -n ${DST_TOKEN_ENV:-} ]]; then export AZURE_DEVOPS_EXT_PAT=${!DST_TOKEN_ENV:-}; fi
+    az "$@" </dev/null )
+}
+
+# Same contract as create_github. Azure repos have no visibility of their own: it comes from the project.
+create_azure() {
+  command -v az >/dev/null || { echo "az is not installed" >&2; return 1; }
+  [[ $visibility != public ]] || { echo "Azure DevOps repos follow the project's visibility; --public is not supported" >&2; return 1; }
+  dst_token_ok || return 1
+  local -a p; IFS=/ read -r -a p <<< "$1"
+  local org proj repo
+  if [[ ${#p[@]} -eq 4 && ${p[2]} == _git ]]; then org=${p[0]} proj=${p[1]} repo=${p[3]}
+  elif [[ ${#p[@]} -eq 3 && ${p[1]} == _git ]]; then org=${p[0]} proj=${p[2]} repo=${p[2]}
+  elif [[ ${#p[@]} -eq 4 && ${p[0]} == v3 ]]; then org=${p[1]} proj=${p[2]} repo=${p[3]}
+  else echo "cannot read organization, project and repo from the URL" >&2; return 1; fi
+  proj=${proj//%20/ }; repo=${repo//%20/ }
+  local orgurl=https://dev.azure.com/$org err
+  if err=$(az_dst repos show --repository "$repo" --project "$proj" --organization "$orgurl" -o none 2>&1); then return 2; fi
+  [[ $err == *TF401019* ]] ||
+    { echo "az could not check the repo (azure-devops extension missing, not logged in, bad PAT or unknown project)" >&2; return 1; }
+  [[ $2 == check ]] && return 0
+  az_dst repos create --name "$repo" --project "$proj" --organization "$orgurl" -o none || return 1
+}
+
 create_dest() {
   parse_url "$1"
   local host; host=$(ssh -G "$url_host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
   case ${host:-$url_host} in
     github.com|ssh.github.com) create_github "$url_path" "$2";;
+    dev.azure.com|ssh.dev.azure.com) create_azure "$url_path" "$2";;
     *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac
 }
