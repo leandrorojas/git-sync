@@ -33,7 +33,7 @@ usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
-D_SRC_USER=${GIT_SYNC_SRC_USER:-x-access-token}; D_DST_USER=${GIT_SYNC_DST_USER:-x-access-token}
+D_SRC_USER=${GIT_SYNC_SRC_USER:-}; D_DST_USER=${GIT_SYNC_DST_USER:-}
 D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}
 while [[ ${1:-} == -* ]]; do
   case $1 in
@@ -204,10 +204,6 @@ create_bitbucket() {
   [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
     { echo "Bitbucket paths must be workspace/repo, using only letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required Bitbucket || return 1
-  if [[ -n ${DST_API_USER:-} && $DST_USER == x-token-auth ]]; then
-    echo "an API token (dst_api_user) also needs dst_user set to the git user name for API tokens; x-token-auth is only for access tokens" >&2
-    return 1
-  fi
   local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
   http_dst bitbucket_auth GET "$url"
   case $http_code in
@@ -295,10 +291,11 @@ sync_one() {
   echo "ok   $name ($(printf '%s\n' "$srcrefs" | wc -l | tr -d ' ') refs verified)"
 }
 
-# Bitbucket access tokens log in over HTTPS as x-token-auth; the other hosts accept any user name.
-user_for() {
-  if [[ $2 == x-access-token ]]; then parse_url "$1"; [[ $url_host == bitbucket.org ]] && { printf x-token-auth; return; }; fi
-  printf '%s' "$2"
+# The HTTPS user name when none was set. Bitbucket access tokens log in as x-token-auth; the other hosts accept any name.
+# Over SSH the name plays no part.
+default_user() {
+  if [[ $1 == http://* || $1 == https://* ]]; then parse_url "$1"; [[ $url_host == bitbucket.org ]] && { printf x-token-auth; return; }; fi
+  printf x-access-token
 }
 
 run_pair() { # src dst [k=v ...]
@@ -314,7 +311,11 @@ run_pair() { # src dst [k=v ...]
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
-  SRC_USER=$(user_for "$src" "$SRC_USER"); DST_USER=$(user_for "$dst" "$DST_USER")
+  SRC_USER=${SRC_USER:-$(default_user "$src")}; DST_USER=${DST_USER:-$(default_user "$dst")}
+  if [[ -n $DST_API_USER && $DST_USER == x-token-auth ]]; then
+    echo "FAIL $src: an API token (dst_api_user) also needs dst_user set to the git user name for API tokens; x-token-auth is only for access tokens" >&2
+    return 1
+  fi
   sync_one "$src" "$dst"
 }
 

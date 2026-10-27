@@ -210,7 +210,7 @@ BB_TOK=bbtok check "bitbucket: the token is read from stdin, never argv" bash -c
 BB_TOK=bbreadonly check "bitbucket: a refused create shows Bitbucket's own message" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/ro 2>&1 | grep -q 'privilege scopes'"
 BB_TOK=bbtok check "bitbucket: altssh.bitbucket.org resolves to bitbucket" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' git@bb-alt:ws/viaalt.git && [[ -d '$t/bitbucket/ws/viaalt.git' ]]"
 BB_TOK=bbtok check "bitbucket: a path that could break the curl config is refused before any call" bash -c "! '$gs' --create --dst-token-env BB_TOK '$t/src' 'https://bitbucket.org/ws/x\"' && ! grep -q 'repo:ws/x' '$t/gl.log.env'"
-check "user_for: x-token-auth for Bitbucket access tokens, unchanged elsewhere" bash -c "eval \"\$(sed -n '/^parse_url()/,/^}/p;/^user_for()/,/^}/p' '$gs')\"; [[ \$(user_for https://bitbucket.org/ws/r x-access-token) == x-token-auth && \$(user_for git@bitbucket.org:ws/r.git x-access-token) == x-token-auth && \$(user_for https://github.com/o/r x-access-token) == x-access-token && \$(user_for https://bitbucket.org/ws/r me) == me ]]"
+check "default_user: x-token-auth only for Bitbucket over HTTPS" bash -c "eval \"\$(sed -n '/^parse_url()/,/^}/p;/^default_user()/,/^}/p' '$gs')\"; [[ \$(default_user https://bitbucket.org/ws/r) == x-token-auth && \$(default_user git@bitbucket.org:ws/r.git) == x-access-token && \$(default_user ssh://git@bitbucket.org/ws/r.git) == x-access-token && \$(default_user https://github.com/o/r) == x-access-token ]]"
 BB_TOK=bbtok GIT_SYNC_DST_USER=x-bitbucket-api-token-auth check "bitbucket: dst_user alone changes the git user, not the API auth" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/gituser && grep -q 'bb-cred-from:bbtok repo:ws/gituser' '$t/gl.log.env'"
 BB_TOK=bbtok check "bitbucket: a create refused with 404 names the workspace" bash -c "'$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/nows/r 2>&1 | grep -q \"workspace 'nows'\""
 mkdir -p gitlog; printf '#!/usr/bin/env bash\necho "$*" >> "$GIT_ARGS_LOG"\nexec "%s" "$@"\n' "$(command -v git)" > gitlog/git; chmod +x gitlog/git
@@ -221,6 +221,10 @@ BB_TOK=bbtok GIT_ARGS_LOG=$t/ga3.log check "an explicit dst_user in a pairs file
 BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: an API user with the default git user is refused before anything is created" bash -c "! '$gs' --create --dst-token-env BB_PW '$t/src' https://bitbucket.org/ws/apirefused && [[ ! -d '$t/bitbucket/ws/apirefused.git' ]] && ! grep -q 'repo:ws/apirefused' '$t/gl.log.env'"
 printf '%s https://bitbucket.org/ws/apipairs dst_token_env=BB_PW dst_api_user=me dst_user=x-bitbucket-api-token-auth\n' "$t/src" > api-pairs.txt
 BB_PW=apppw check "bitbucket: dst_api_user and dst_user work from a pairs file" bash -c "'$gs' --create -f '$t/api-pairs.txt' && grep -q 'bb-cred-from:me:apppw repo:ws/apipairs' '$t/gl.log.env'"
+BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: an API token with an SSH destination needs no git user name" bash -c "'$gs' --create --dst-token-env BB_PW '$t/src' git@bitbucket.org:ws/sshapi.git && [[ -d '$t/bitbucket/ws/sshapi.git' ]]"
+BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: the API-token guard also stops a plain sync" bash -c "'$gs' '$t/src' https://bitbucket.org/ws/plainsync 2>&1 | grep -q 'also needs dst_user'"
+printf '%s https://bitbucket.org/ws/explicit dst_token_env=BB_TOK dst_user=x-access-token\n' "$t/src" > explicit-pairs.txt
+BB_TOK=bbtok GIT_ARGS_LOG=$t/ga4.log check "an explicit dst_user=x-access-token on Bitbucket is kept" bash -c "PATH='$t/gitlog':\$PATH '$gs' --create -f '$t/explicit-pairs.txt' && grep -q 'username=x-access-token' '$t/ga4.log' && ! grep -q 'username=x-token-auth' '$t/ga4.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@example.org:me/x.git"
 
 echo "$pass passed, $fail failed"
