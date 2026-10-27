@@ -4,7 +4,7 @@ Copies a repo's full history (all branches and tags) to another repo, on any git
 Re-running transfers only what changed. For migrating a repo between accounts or services, and for backups.
 
 ```
-./git-sync [--dry-run] [--force] [--prune] <source-url> <dest-url>
+./git-sync [--dry-run] [--force] [--prune] [--create [--public]] <source-url> <dest-url>
 ./git-sync [options] -f pairs.txt
 ```
 
