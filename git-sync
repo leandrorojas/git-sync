@@ -143,9 +143,16 @@ http_dst() {
              printf 'header = "Content-Type: application/json"\n'
              data=${data//\\/\\\\}; printf 'data = "%s"\n' "${data//\"/\\\"}"
            fi
-         } | curl -sS -m 30 -K - -w '\n%{http_code}' 2>/dev/null )
+         } | curl -q -sS -m 30 -K - -w '\n%{http_code}' 2>/dev/null )
   http_code=${out##*$'\n'}; http_body=${out%$'\n'*}
   [[ $http_code =~ ^[0-9]{3}$ ]] || { http_code=000; http_body=; }
+}
+
+# http_fail <Provider> <what was being done>: the status and the start of the provider's own message (no secrets in it).
+http_fail() {
+  if [[ $http_code == 000 ]]; then echo "could not reach $1 while $2 (no network, or curl failed)" >&2
+  else echo "$1 answered $http_code while $2: $(printf '%s' "$http_body" | head -c 200)" >&2; fi
+  return 1
 }
 
 need_curl() { command -v curl >/dev/null || { echo "curl is not installed" >&2; return 1; }; }
@@ -166,7 +173,7 @@ create_gitlab() {
   case $http_code in
     200) return 2;;
     404) ;;
-    *) echo "GitLab answered $http_code when checking the repo (bad token, missing scope or no network)" >&2; return 1;;
+    *) http_fail GitLab "checking the repo (bad token, missing scope or no network)";;
   esac
   http_dst gitlab_auth GET "$api/namespaces/${ns//\//%2F}"
   local nsid; nsid=$(printf '%s' "$http_body" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
@@ -175,8 +182,8 @@ create_gitlab() {
   [[ $2 == check ]] && return 0
   http_dst gitlab_auth POST "$api/projects" "{\"name\":\"$name\",\"path\":\"$name\",\"namespace_id\":$nsid,\"visibility\":\"$visibility\"}"
   [[ $http_body != *"has already been taken"* ]] ||
-    { echo "GitLab says the project already exists; the token just cannot see it" >&2; return 1; }
-  [[ $http_code == 201 ]] || { echo "GitLab answered $http_code when creating the repo" >&2; return 1; }
+    { echo "GitLab says that name or path is already taken: a project the token cannot see, or a group with that path" >&2; return 1; }
+  [[ $http_code == 201 ]] || http_fail GitLab "creating the repo"
 }
 
 create_dest() {

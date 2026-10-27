@@ -88,6 +88,7 @@ STUB
 cat > bin/curl <<'STUB'
 #!/usr/bin/env bash
 echo "$@" >> "$GL_LOG"
+[[ -z ${GL_NET_DOWN:-} ]] || exit 7
 url=; method=GET; tok=; data=
 while IFS= read -r line; do
   case $line in
@@ -100,12 +101,13 @@ done
 data=${data//\\\"/\"}
 echo "$method $url data:$data" >> "$GL_LOG.req"; echo "gl-token-from:$tok" >> "$GL_LOG.env"
 reply() { printf '%s\n%s' "$2" "$1"; exit 0; }
-[[ $tok == gltok ]] || reply 401 '{"message":"401 Unauthorized"}'
+[[ $tok == gltok || $tok == readonly ]] || reply 401 '{"message":"401 Unauthorized"}'
 path=${url#https://gitlab.com/api/v4}
 case "$method $path" in
   "GET /projects/"*) enc=${path#/projects/}; [[ -d $GL_REMOTES/${enc//%2F//}.git ]] && reply 200 '{"id":7}' || reply 404 '{"message":"404 Project Not Found"}';;
   "GET /namespaces/"*) case ${path#/namespaces/} in me) reply 200 '{"id":42,"name":"me"}';; group%2Fsub) reply 200 '{"id":44,"name":"sub"}';; *) reply 404 '{}';; esac;;
   "POST /projects")
+    [[ $tok != readonly ]] || reply 403 '{"message":"403 Forbidden - Your token has not enough scopes"}'
     name=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' <<<"$data"); nsid=$(sed -n 's/.*"namespace_id":\([0-9]*\).*/\1/p' <<<"$data")
     [[ $name != hidden ]] || reply 400 '{"message":{"name":["has already been taken"],"path":["has already been taken"]}}'
     case $nsid in 42) ns=me;; 44) ns=group/sub;; *) reply 400 '{}';; esac
@@ -171,8 +173,12 @@ mkdir -p gitlab/me/broken.git
 GL_TOK=gltok check "gitlab: an existing unreadable project is not recreated" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/broken && ! grep -q '\"path\":\"broken\"' '$t/gl.log.req'"
 GL_TOK=gltok check "gitlab: the token is read from stdin, never argv" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/proj5 && grep -q 'gl-token-from:gltok' '$t/gl.log.env' && ! grep -q gltok '$t/gl.log'"
 GL_TOK=gltok check "gitlab: a dry run also checks the group exists" bash -c "! '$gs' --create --dry-run --dst-token-env GL_TOK '$t/src' https://gitlab.com/nogroup/dry3"
-GL_TOK=gltok check "gitlab: an invisible existing project gets a clear message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/hidden 2>&1 | grep -q 'token just cannot see it'"
+GL_TOK=gltok check "gitlab: an invisible existing project gets a clear message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/hidden 2>&1 | grep -q 'already taken'"
 GL_TOK=gltok check "gitlab: altssh.gitlab.com resolves to gitlab" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' git@gl-alt:me/viaalt.git && [[ -d '$t/gitlab/me/viaalt.git' ]]"
+GL_TOK=readonly check "gitlab: a refused create shows GitLab's own message" bash -c "'$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/ro 2>&1 | grep -q 'not enough scopes'"
+GL_TOK=gltok check "gitlab: no network is reported as unreachable, not as an HTTP status" bash -c "GL_NET_DOWN=1 '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/down 2>&1 | grep -q 'could not reach GitLab'"
+printf '%s https://gitlab.com/me/frompairs dst_token_env=GL_PAIR_TOK\n' "$t/src" > gl-pairs.txt
+check "gitlab: the token comes from dst_token_env= in a pairs file" bash -c "GL_PAIR_TOK=gltok '$gs' --create -f '$t/gl-pairs.txt' && [[ -d '$t/gitlab/me/frompairs.git' ]]"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
