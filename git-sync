@@ -7,10 +7,10 @@
 #   git-sync [options] -f <pairs-file>
 #
 # Pairs file: one pair per line, "# comments" and blank lines ignored:
-#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U]
+#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U] [dst_api_user=U]
 #   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
-#   user = HTTPS user name sent with the token (default x-access-token; x-token-auth on bitbucket.org). On Bitbucket,
-#   setting it also sends the token to the API as that user's app password instead of as a Bearer access token.
+#   user = HTTPS user name for git (default x-access-token; x-token-auth on bitbucket.org).
+#   dst_api_user = Bitbucket only: the account email, when the token is an API token; without it the token is a Bearer access token.
 #
 # Options:
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
@@ -33,6 +33,7 @@ dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
 D_SRC_USER=${GIT_SYNC_SRC_USER:-x-access-token}; D_DST_USER=${GIT_SYNC_DST_USER:-x-access-token}
+D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}
 while [[ ${1:-} == -* ]]; do
   case $1 in
     --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --create) create=1;; --public) visibility=public;;
@@ -190,11 +191,11 @@ create_gitlab() {
   [[ $http_code == 201 ]] || http_fail GitLab "creating the repo"
 }
 
-# With dst_user left at its default the token is sent as a Bearer (repository or workspace access token);
-# with dst_user set it is an app password or API token for that user.
+# App passwords were removed in 2026. An API token logs into the API as the account email but into git over HTTPS
+# as another user name, so the API identity and the git user name are separate settings.
 bitbucket_auth() {
-  if [[ $DST_USER == x-access-token || $DST_USER == x-token-auth ]]; then printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"
-  else printf 'user = "%s:%s"\n' "$DST_USER" "${!DST_TOKEN_ENV}"; fi
+  if [[ -n ${DST_API_USER:-} ]]; then printf 'user = "%s:%s"\n' "$DST_API_USER" "${!DST_TOKEN_ENV}"
+  else printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"; fi
 }
 
 # Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
@@ -212,6 +213,8 @@ create_bitbucket() {
   [[ $2 == check ]] && return 0
   [[ $visibility == public ]] && private=false
   http_dst bitbucket_auth POST "$url" "{\"scm\":\"git\",\"is_private\":$private}"
+  [[ $http_code != 404 ]] ||
+    { echo "Bitbucket workspace '${1%/*}' not found or not visible to the token, or the token cannot create repos there" >&2; return 1; }
   [[ $http_code == 200 || $http_code == 201 ]] || http_fail Bitbucket "creating the repo"
 }
 
@@ -296,13 +299,13 @@ user_for() {
 run_pair() { # src dst [k=v ...]
   local src=$1 dst=$2; shift 2
   SRC_KEY=$D_SRC_KEY; DST_KEY=$D_DST_KEY; SRC_TOKEN_ENV=$D_SRC_TOKEN_ENV; DST_TOKEN_ENV=$D_DST_TOKEN_ENV
-  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER
+  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER; DST_API_USER=$D_DST_API_USER
   local kv
   for kv in "$@"; do
     case $kv in
       src_key=*) SRC_KEY=${kv#*=};; dst_key=*) DST_KEY=${kv#*=};;
       src_token_env=*) SRC_TOKEN_ENV=${kv#*=};; dst_token_env=*) DST_TOKEN_ENV=${kv#*=};;
-      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};;
+      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};; dst_api_user=*) DST_API_USER=${kv#*=};;
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
