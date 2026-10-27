@@ -150,7 +150,7 @@ http_dst() {
 
 # http_fail <Provider> <what was being done>: the status and the start of the provider's own message (no secrets in it).
 http_fail() {
-  if [[ $http_code == 000 ]]; then echo "could not reach $1 while $2 (no network, or curl failed)" >&2
+  if [[ $http_code == 000 ]]; then echo "could not reach $1 while $2 (no network, curl failed or timed out; if this was the create call it may still have gone through, so rerun)" >&2
   else echo "$1 answered $http_code while $2: $(printf '%s' "$http_body" | head -c 200)" >&2; fi
   return 1
 }
@@ -167,13 +167,15 @@ gitlab_auth() { printf 'header = "PRIVATE-TOKEN: %s"\n' "${!DST_TOKEN_ENV}"; }
 # Same contract as create_github. Needs a token with the api scope in the DST_TOKEN_ENV variable.
 create_gitlab() {
   [[ $1 == */* ]] || { echo "cannot read group/project from the URL" >&2; return 1; }
+  [[ $1 =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] ||
+    { echo "GitLab paths may only use letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required GitLab || return 1
   local api=https://gitlab.com/api/v4 ns=${1%/*} name=${1##*/}
   http_dst gitlab_auth GET "$api/projects/${1//\//%2F}"
   case $http_code in
     200) return 2;;
     404) ;;
-    *) http_fail GitLab "checking the repo (bad token, missing scope or no network)"; return 1;;
+    *) http_fail GitLab "checking the repo (bad token or scope, rate limit or outage)"; return 1;;
   esac
   http_dst gitlab_auth GET "$api/namespaces/${ns//\//%2F}"
   local nsid; nsid=$(printf '%s' "$http_body" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
