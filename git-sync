@@ -12,6 +12,7 @@
 #
 # Options:
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
+#               (with --create and a missing destination it only checks that the repo can be created)
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
 #   --create    create the destination repo if it doesn't exist (private); GitHub only for now, via `gh`
@@ -23,7 +24,7 @@
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
@@ -65,7 +66,7 @@ parse_url() {
   else
     u=${u#*@}; url_host=${u%%:*}; url_path=${u#*:}
   fi
-  url_path=${url_path%.git}; url_path=${url_path%/}
+  url_path=${url_path#/}; url_path=${url_path%/}; url_path=${url_path%.git}
 }
 
 # gh_dst <gh args...>: run gh as the destination's token when one is set, else as gh's own login.
@@ -78,6 +79,10 @@ gh_dst() {
 create_github() {
   command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
+  if [[ -n ${DST_TOKEN_ENV:-} && -z ${!DST_TOKEN_ENV:-} ]]; then
+    echo "env var $DST_TOKEN_ENV is empty; gh would fall back to its own login and could create the repo in the wrong account" >&2
+    return 1
+  fi
   local err
   if err=$(gh_dst repo view "$1" 2>&1 >/dev/null </dev/null); then return 2; fi
   [[ $err == *"Could not resolve to a Repository"* ]] ||

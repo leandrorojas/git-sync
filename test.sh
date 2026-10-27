@@ -71,7 +71,7 @@ export GIT_CONFIG_COUNT=5 GIT_CONFIG_KEY_0="url.$t/remotes/.insteadOf" GIT_CONFI
 /bin/rm -rf "${GIT_SYNC_DIR:?}"
 
 check "missing destination fails without --create" bash -c "! '$gs' '$t/src' git@github.com:me/new.git"
-check "--create --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/src' git@github.com:me/new.git && [[ ! -d '$t/remotes/me/new.git' ]]"
+check "--create --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/src' git@github.com:me/new.git && [[ ! -d '$t/remotes/me/new.git' ]] && ! grep -q 'repo create' '$t/gh.log'"
 check "--create makes a private repo and syncs it" bash -c "'$gs' --create '$t/src' git@github.com:me/new.git && grep -q -- '--private' '$t/gh.log' && git -C '$t/remotes/me/new.git' show-ref --verify -q refs/heads/main"
 check "--create --public makes a public repo" bash -c "'$gs' --create --public '$t/src' https://github.com/me/pub.git && grep -q -- '--public' '$t/gh.log'"
 mkdir -p remotes/me/broken.git
@@ -82,6 +82,9 @@ check "--create resolves an SSH alias to github.com" bash -c "'$gs' --create '$t
 DEST_TOK=tok123 check "--create gives gh the destination token, not on argv" bash -c "'$gs' --create --dst-token-env DEST_TOK '$t/src' git@github.com:me/withtoken.git && grep -q 'gh-token-from:tok123' '$t/gh.log.env' && ! grep -q tok123 '$t/gh.log'"
 check "--create --dry-run fails when gh cannot check the repo" bash -c "! GH_FAIL=1 '$gs' --create --dry-run '$t/src' git@github.com:me/gh-down.git"
 check "--create does not create when gh cannot check the repo" bash -c "! GH_FAIL=1 '$gs' --create '$t/src' git@github.com:me/gh-down.git && [[ ! -d '$t/remotes/me/gh-down.git' ]]"
+check "--create names the repo right for a .git/ URL" bash -c "'$gs' --create '$t/src' https://github.com/me/trailing.git/ && grep -q -- 'repo create me/trailing --private' '$t/gh.log'"
+check "--create names the repo right for a scp URL with a leading slash" bash -c "'$gs' --create '$t/src' git@github.com:/me/slashed.git && grep -q -- 'repo create me/slashed --private' '$t/gh.log'"
+check "--create refuses an empty --dst-token-env" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' git@github.com:me/notok.git && ! grep -q 'repo create me/notok' '$t/gh.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 
 echo "$pass passed, $fail failed"
