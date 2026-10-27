@@ -171,7 +171,7 @@ gitlab_auth() { printf 'header = "PRIVATE-TOKEN: %s"\n' "${!DST_TOKEN_ENV}"; }
 # Same contract as create_github. Needs a token with the api scope in the DST_TOKEN_ENV variable.
 create_gitlab() {
   [[ $1 == */* ]] || { echo "cannot read group/project from the URL" >&2; return 1; }
-  [[ $1 =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] ||
+  [[ $1 =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ && /$1/ != */./* && /$1/ != */../* ]] ||
     { echo "GitLab paths may only use letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required GitLab || return 1
   local api=https://gitlab.com/api/v4 ns=${1%/*} name=${1##*/}
@@ -201,7 +201,7 @@ bitbucket_auth() {
 
 # Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
 create_bitbucket() {
-  [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+  [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && /$1/ != */./* && /$1/ != */../* ]] ||
     { echo "Bitbucket paths must be workspace/repo, using only letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required Bitbucket || return 1
   local url=https://api.bitbucket.org/2.0/repositories/$1 private=true

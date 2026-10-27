@@ -225,6 +225,8 @@ BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: an API token with an SSH 
 BB_PW=apppw GIT_SYNC_DST_API_USER=me check "bitbucket: the API-token guard also stops a plain sync" bash -c "'$gs' '$t/src' https://bitbucket.org/ws/plainsync 2>&1 | grep -q 'also needs dst_user'"
 printf '%s https://bitbucket.org/ws/explicit dst_token_env=BB_TOK dst_user=x-access-token\n' "$t/src" > explicit-pairs.txt
 BB_TOK=bbtok GIT_ARGS_LOG=$t/ga4.log check "an explicit dst_user=x-access-token on Bitbucket is kept" bash -c "PATH='$t/gitlog':\$PATH '$gs' --create -f '$t/explicit-pairs.txt' && grep -q 'username=x-access-token' '$t/ga4.log' && ! grep -q 'username=x-token-auth' '$t/ga4.log'"
+BB_TOK=bbtok check "bitbucket: a dot-segment path is refused before any call" bash -c "! '$gs' --create --dst-token-env BB_TOK '$t/src' https://bitbucket.org/ws/.. && ! grep -q 'repo:ws/\.\.' '$t/gl.log.env'"
+GL_TOK=gltok check "gitlab: a dot-segment path is refused before any call" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/.. && ! grep -q 'projects/me%2F\.\.' '$t/gl.log.req'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@example.org:me/x.git"
 
 echo "$pass passed, $fail failed"
