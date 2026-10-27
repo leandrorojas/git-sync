@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# git-sync: copy a repo's full history (all branches and tags) to another repo, and keep it in sync.
+# Works between any git hosts. Re-running only transfers what changed.
+#
+# Usage:
+#   git-sync [options] <source-url> <dest-url>
+#   git-sync [options] -f <pairs-file>
+#
+# Pairs file: one pair per line, "# comments" and blank lines ignored:
+#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U]
+#   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
+#
+# Options:
+#   --dry-run   fetch the source and simulate the push; changes nothing at the destination
+#   --force     allow a non-empty destination on the first run, and non-fast-forward updates
+#   --prune     delete branches/tags at the destination that no longer exist at the source
+#   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
+#
+# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} as defaults.
+# Exit: 0 all pairs ok, 1 at least one pair failed, 2 bad usage.
+set -uo pipefail
+export GIT_TERMINAL_PROMPT=0
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+dry=0; force=0; prune=0; file=
+D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
+D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
+D_SRC_USER=${GIT_SYNC_SRC_USER:-x-access-token}; D_DST_USER=${GIT_SYNC_DST_USER:-x-access-token}
+while [[ ${1:-} == -* ]]; do
+  case $1 in
+    --dry-run) dry=1;; --force) force=1;; --prune) prune=1;;
+    -f) file=${2:-}; shift;;
+    --src-key) D_SRC_KEY=${2:-}; shift;; --dst-key) D_DST_KEY=${2:-}; shift;;
+    --src-token-env) D_SRC_TOKEN_ENV=${2:-}; shift;; --dst-token-env) D_DST_TOKEN_ENV=${2:-}; shift;;
+    *) usage;;
+  esac; shift
+done
+if [[ -n $file ]]; then [[ $# -eq 0 && -f $file ]] || usage; else [[ $# -eq 2 ]] || usage; fi
+
+cache_root=${GIT_SYNC_DIR:-$HOME/.cache/git-sync}
+mkdir -p "$cache_root" || exit 1
+
+# gitc <SRC|DST> <git args...>: run git with that side's credentials.
+gitc() {
+  local side=$1; shift
+  local k=${side}_KEY t=${side}_TOKEN_ENV u=${side}_USER
+  local -a pre=()
+  if [[ -n ${!t:-} ]]; then
+    pre=(-c credential.helper= -c "credential.helper=!f() { echo username=${!u}; echo \"password=\$${!t}\"; }; f")
+  fi
+  if [[ -n ${!k:-} ]]; then
+    GIT_SSH_COMMAND="ssh -i ${!k} -o IdentitiesOnly=yes -o BatchMode=yes" git ${pre[@]+"${pre[@]}"} "$@"
+  else
+    git ${pre[@]+"${pre[@]}"} "$@"
+  fi
+}
+
+# refs <SRC|DST> <url>: sorted "sha ref" lines for heads and tags, without peeled entries.
+refs() {
+  local out; out=$(gitc "$1" ls-remote --heads --tags "$2") || return 1
+  [[ -z $out ]] || printf '%s
+' "$out" | grep -v '\^{}$' | sort -k2
+  return 0
+}
+
+sync_one() {
+  local src=$1 dst=$2 name; name=$(basename "$src"); name=${name%.git}
+  local id; id=$( { printf '%s\n%s' "$src" "$dst" | { shasum 2>/dev/null || sha1sum; }; } | cut -c1-12)
+  local cache=$cache_root/$id.git first=0
+  [[ -d $cache ]] || first=1
+
+  local srcrefs dstrefs
+  srcrefs=$(refs SRC "$src") || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
+  [[ -n $(printf '%s\n' "$srcrefs" | grep 'refs/heads/') ]] ||
+    { echo "FAIL $name: source has no branches; refusing to continue" >&2; return 1; }
+  dstrefs=$(refs DST "$dst") || { echo "FAIL $name: cannot read destination (auth, URL or repo missing)" >&2; return 1; }
+  if (( first && force == 0 )) && [[ -n $dstrefs ]]; then
+    echo "FAIL $name: destination already has refs and this pair was never synced here; rerun with --force to adopt it" >&2
+    return 1
+  fi
+
+  (( first )) && { git init --bare -q "$cache" || return 1; git -C "$cache" config gc.auto 0; }
+
+  gitc SRC -C "$cache" fetch -q --no-tags --prune "$src" \
+    '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' ||
+    { echo "FAIL $name: fetch failed" >&2; return 1; }
+
+  local -a flags=()
+  (( force )) && flags+=(--force); (( prune )) && flags+=(--prune); (( dry )) && flags+=(--dry-run)
+  gitc DST -C "$cache" push -q ${flags[@]+"${flags[@]}"} "$dst" \
+    'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' ||
+    { echo "FAIL $name: push failed (rejected refs need --force; read-only credentials also land here)" >&2; return 1; }
+
+  if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed)"; return 0; fi
+
+  local after missing
+  after=$(refs DST "$dst") || { echo "FAIL $name: pushed, but could not re-read destination to verify" >&2; return 1; }
+  missing=$(comm -23 <(printf '%s\n' "$srcrefs") <(printf '%s\n' "$after"))
+  if [[ -n $missing ]]; then
+    echo "FAIL $name: destination differs from source after push:" >&2
+    printf '%s\n' "$missing" | sed 's/^/       /' >&2
+    return 1
+  fi
+  echo "ok   $name ($(printf '%s\n' "$srcrefs" | wc -l | tr -d ' ') refs verified)"
+}
+
+run_pair() { # src dst [k=v ...]
+  local src=$1 dst=$2; shift 2
+  SRC_KEY=$D_SRC_KEY; DST_KEY=$D_DST_KEY; SRC_TOKEN_ENV=$D_SRC_TOKEN_ENV; DST_TOKEN_ENV=$D_DST_TOKEN_ENV
+  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER
+  local kv
+  for kv in "$@"; do
+    case $kv in
+      src_key=*) SRC_KEY=${kv#*=};; dst_key=*) DST_KEY=${kv#*=};;
+      src_token_env=*) SRC_TOKEN_ENV=${kv#*=};; dst_token_env=*) DST_TOKEN_ENV=${kv#*=};;
+      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};;
+      *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
+    esac
+  done
+  sync_one "$src" "$dst"
+}
+
+failed=0
+if [[ -n $file ]]; then
+  while read -r src dst rest; do
+    [[ -z $src || $src == \#* ]] && continue
+    if [[ -z $dst ]]; then echo "FAIL $src: line has no destination" >&2; failed=1; continue; fi
+    # shellcheck disable=SC2086
+    run_pair "$src" "$dst" $rest || failed=1
+  done < "$file"
+else
+  run_pair "$1" "$2" || failed=1
+fi
+exit $failed
