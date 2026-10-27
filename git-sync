@@ -7,8 +7,11 @@
 #   git-sync [options] -f <pairs-file>
 #
 # Pairs file: one pair per line, "# comments" and blank lines ignored:
-#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U]
+#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U] [dst_api_user=U]
 #   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
+#   user = HTTPS user name for git (default x-access-token; x-token-auth on bitbucket.org).
+#   dst_api_user = Bitbucket only: the account email, when the token is an API token; without it the token is a Bearer access token.
+#                  An API token also needs dst_user=x-bitbucket-api-token-auth (the name comes from third-party docs, unconfirmed).
 #
 # Options:
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
@@ -16,21 +19,22 @@
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
 #   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`,
-#               gitlab.com via its API (needs a token: --dst-token-env or dst_token_env=)
+#               gitlab.com and bitbucket.org via their APIs (need a token: --dst-token-env or dst_token_env=)
 #   --public    with --create, make the new repo public (refused on Azure DevOps, where the project sets it)
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
-# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} as defaults.
+# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} and GIT_SYNC_DST_API_USER as defaults.
 # Exit: 0 all pairs ok, 1 at least one pair failed, 2 bad usage.
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
-D_SRC_USER=${GIT_SYNC_SRC_USER:-x-access-token}; D_DST_USER=${GIT_SYNC_DST_USER:-x-access-token}
+D_SRC_USER=${GIT_SYNC_SRC_USER:-}; D_DST_USER=${GIT_SYNC_DST_USER:-}
+D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}
 while [[ ${1:-} == -* ]]; do
   case $1 in
     --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --create) create=1;; --public) visibility=public;;
@@ -167,7 +171,7 @@ gitlab_auth() { printf 'header = "PRIVATE-TOKEN: %s"\n' "${!DST_TOKEN_ENV}"; }
 # Same contract as create_github. Needs a token with the api scope in the DST_TOKEN_ENV variable.
 create_gitlab() {
   [[ $1 == */* ]] || { echo "cannot read group/project from the URL" >&2; return 1; }
-  [[ $1 =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ ]] ||
+  [[ $1 =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$ && /$1/ != */./* && /$1/ != */../* ]] ||
     { echo "GitLab paths may only use letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required GitLab || return 1
   local api=https://gitlab.com/api/v4 ns=${1%/*} name=${1##*/}
@@ -188,6 +192,33 @@ create_gitlab() {
   [[ $http_code == 201 ]] || http_fail GitLab "creating the repo"
 }
 
+# App passwords were removed in 2026. An API token logs into the API as the account email but into git over HTTPS
+# as another user name, so the API identity and the git user name are separate settings.
+bitbucket_auth() {
+  if [[ -n ${DST_API_USER:-} ]]; then printf 'user = "%s:%s"\n' "$DST_API_USER" "${!DST_TOKEN_ENV}"
+  else printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"; fi
+}
+
+# Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
+create_bitbucket() {
+  [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && /$1/ != */./* && /$1/ != */../* ]] ||
+    { echo "Bitbucket paths must be workspace/repo, using only letters, digits, '_', '-' and '.'" >&2; return 1; }
+  need_curl && dst_token_required Bitbucket || return 1
+  local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
+  http_dst bitbucket_auth GET "$url"
+  case $http_code in
+    200) return 2;;
+    404) ;;
+    *) http_fail Bitbucket "checking the repo (bad token or scope, rate limit or outage)"; return 1;;
+  esac
+  [[ $2 == check ]] && return 0
+  [[ $visibility == public ]] && private=false
+  http_dst bitbucket_auth POST "$url" "{\"scm\":\"git\",\"is_private\":$private}"
+  [[ $http_code != 404 ]] ||
+    { echo "Bitbucket workspace '${1%/*}' not found or not visible to the token, or the token cannot create repos there" >&2; return 1; }
+  [[ $http_code == 200 || $http_code == 201 ]] || http_fail Bitbucket "creating the repo"
+}
+
 create_dest() {
   parse_url "$1"
   local host; host=$(ssh -G "$url_host" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')
@@ -195,6 +226,7 @@ create_dest() {
     github.com|ssh.github.com) create_github "$url_path" "$2";;
     dev.azure.com|ssh.dev.azure.com) create_azure "$url_path" "$2";;
     gitlab.com|altssh.gitlab.com) create_gitlab "$url_path" "$2";;
+    bitbucket.org|altssh.bitbucket.org) create_bitbucket "$url_path" "$2";;
     *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac
 }
@@ -259,19 +291,31 @@ sync_one() {
   echo "ok   $name ($(printf '%s\n' "$srcrefs" | wc -l | tr -d ' ') refs verified)"
 }
 
+# The HTTPS user name when none was set. Bitbucket access tokens log in as x-token-auth; the other hosts accept any name.
+# Over SSH the name plays no part.
+default_user() {
+  if [[ $1 == http://* || $1 == https://* ]]; then parse_url "$1"; [[ $url_host == bitbucket.org ]] && { printf x-token-auth; return; }; fi
+  printf x-access-token
+}
+
 run_pair() { # src dst [k=v ...]
   local src=$1 dst=$2; shift 2
   SRC_KEY=$D_SRC_KEY; DST_KEY=$D_DST_KEY; SRC_TOKEN_ENV=$D_SRC_TOKEN_ENV; DST_TOKEN_ENV=$D_DST_TOKEN_ENV
-  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER
+  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER; DST_API_USER=$D_DST_API_USER
   local kv
   for kv in "$@"; do
     case $kv in
       src_key=*) SRC_KEY=${kv#*=};; dst_key=*) DST_KEY=${kv#*=};;
       src_token_env=*) SRC_TOKEN_ENV=${kv#*=};; dst_token_env=*) DST_TOKEN_ENV=${kv#*=};;
-      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};;
+      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};; dst_api_user=*) DST_API_USER=${kv#*=};;
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
+  SRC_USER=${SRC_USER:-$(default_user "$src")}; DST_USER=${DST_USER:-$(default_user "$dst")}
+  if [[ -n $DST_API_USER && $DST_USER == x-token-auth ]]; then
+    echo "FAIL $src: an API token (dst_api_user) also needs dst_user set to the git user name for API tokens; x-token-auth is only for access tokens" >&2
+    return 1
+  fi
   sync_one "$src" "$dst"
 }
 
