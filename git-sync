@@ -9,6 +9,8 @@
 # Pairs file: one pair per line, "# comments" and blank lines ignored:
 #   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U]
 #   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
+#   user = HTTPS user name sent with the token (default x-access-token; x-token-auth on bitbucket.org). On Bitbucket,
+#   setting it also sends the token to the API as that user's app password instead of as a Bearer access token.
 #
 # Options:
 #   --dry-run   fetch the source and simulate the push; changes nothing at the destination
@@ -25,7 +27,7 @@
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
@@ -191,13 +193,14 @@ create_gitlab() {
 # With dst_user left at its default the token is sent as a Bearer (repository or workspace access token);
 # with dst_user set it is an app password or API token for that user.
 bitbucket_auth() {
-  if [[ $DST_USER == x-access-token ]]; then printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"
+  if [[ $DST_USER == x-access-token || $DST_USER == x-token-auth ]]; then printf 'header = "Authorization: Bearer %s"\n' "${!DST_TOKEN_ENV}"
   else printf 'user = "%s:%s"\n' "$DST_USER" "${!DST_TOKEN_ENV}"; fi
 }
 
 # Same contract as create_github. Bitbucket puts a new repo in the workspace's oldest project.
 create_bitbucket() {
-  [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read workspace/repo from the URL" >&2; return 1; }
+  [[ $1 =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+    { echo "Bitbucket paths must be workspace/repo, using only letters, digits, '_', '-' and '.'" >&2; return 1; }
   need_curl && dst_token_required Bitbucket || return 1
   local url=https://api.bitbucket.org/2.0/repositories/$1 private=true
   http_dst bitbucket_auth GET "$url"
@@ -219,7 +222,7 @@ create_dest() {
     github.com|ssh.github.com) create_github "$url_path" "$2";;
     dev.azure.com|ssh.dev.azure.com) create_azure "$url_path" "$2";;
     gitlab.com|altssh.gitlab.com) create_gitlab "$url_path" "$2";;
-    bitbucket.org) create_bitbucket "$url_path" "$2";;
+    bitbucket.org|altssh.bitbucket.org) create_bitbucket "$url_path" "$2";;
     *) echo "--create does not support host '${host:-$url_host}' yet" >&2; return 1;;
   esac
 }
@@ -284,6 +287,12 @@ sync_one() {
   echo "ok   $name ($(printf '%s\n' "$srcrefs" | wc -l | tr -d ' ') refs verified)"
 }
 
+# Bitbucket access tokens log in over HTTPS as x-token-auth; the other hosts accept any user name.
+user_for() {
+  if [[ $2 == x-access-token ]]; then parse_url "$1"; [[ $url_host == bitbucket.org ]] && { printf x-token-auth; return; }; fi
+  printf '%s' "$2"
+}
+
 run_pair() { # src dst [k=v ...]
   local src=$1 dst=$2; shift 2
   SRC_KEY=$D_SRC_KEY; DST_KEY=$D_DST_KEY; SRC_TOKEN_ENV=$D_SRC_TOKEN_ENV; DST_TOKEN_ENV=$D_DST_TOKEN_ENV
@@ -297,6 +306,7 @@ run_pair() { # src dst [k=v ...]
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
+  SRC_USER=$(user_for "$src" "$SRC_USER"); DST_USER=$(user_for "$dst" "$DST_USER")
   sync_one "$src" "$dst"
 }
 
