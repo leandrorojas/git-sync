@@ -6,7 +6,7 @@ One bash script, `git-sync`, that copies a repo's full history to another repo a
 When I say "migrate <old url> to <new url>", or hand over a pairs file:
 1. Confirm the destination repo exists and is empty. If it doesn't, offer `--create` (private; `--public` only if I say so). It works for GitHub only, through `gh`; for other hosts, ask me to create the repo.
 2. Ask which credentials each side needs: SSH key path or token env var name, per side. Never ask me to paste a secret, and never put one in the pairs file or on a command line.
-3. Run with `--dry-run` first, then for real. Report each line it prints; `ok` means every source ref was verified at the destination.
+3. Run with `--dry-run` first, then for real. Report each line it prints. On a real run `ok` means every source ref was verified at the destination; a dry-run `ok` only says what was simulated (with `--create` and a missing destination, nothing is fetched or pushed).
 4. A `FAIL` line says why. `--force` only after I agree: it allows a non-empty destination and overwriting rewritten history.
 5. For a recurring sync, propose a cron line on the host that has both credentials; don't install it without asking.
 

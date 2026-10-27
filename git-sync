@@ -78,7 +78,10 @@ gh_dst() {
 create_github() {
   command -v gh >/dev/null || { echo "gh is not installed" >&2; return 1; }
   [[ $1 == */* && $1 != */*/* ]] || { echo "cannot read owner/name from the URL" >&2; return 1; }
-  if gh_dst repo view "$1" >/dev/null 2>&1; then return 2; fi
+  local err
+  if err=$(gh_dst repo view "$1" 2>&1 >/dev/null </dev/null); then return 2; fi
+  [[ $err == *"Could not resolve to a Repository"* ]] ||
+    { echo "gh could not check the repo (not logged in, bad token or no network)" >&2; return 1; }
   [[ $2 == check ]] && return 0
   gh_dst repo create "$1" "--$visibility" >/dev/null || return 1
 }
