@@ -68,6 +68,7 @@ cat > bin/az <<'STUB'
 echo "$@" >> "$AZ_LOG"
 [[ -n ${AZURE_DEVOPS_EXT_PAT:-} ]] && echo "az-pat-from:${AZURE_DEVOPS_EXT_PAT}" >> "$AZ_LOG.env"
 [[ -z ${AZ_FAIL:-} ]] || { echo "Please run 'az login' to setup account." >&2; exit 1; }
+[[ $* != *"--project noproj"* ]] || { echo "TF200016: The following project does not exist: noproj." >&2; exit 1; }
 shift; cmd=$1; shift
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -116,8 +117,15 @@ check "azure: --create makes the repo from an ssh v3 URL" bash -c "'$gs' --creat
 check "azure: org/_git/repo URL uses the repo name as the project" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/_git/solo && [[ -d '$t/azure/org1/solo/_git/solo' ]]"
 check "azure: project name with %20 is decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/my%20proj/_git/spaced' && grep -q -- '--project my proj' '$t/az.log'"
 check "azure: --dry-run creates nothing" bash -c "'$gs' --create --dry-run '$t/src' https://dev.azure.com/org1/proj1/_git/dry && [[ ! -d '$t/azure/org1/proj1/_git/dry' ]] && ! grep -q 'repos create --name dry' '$t/az.log'"
-check "azure: --public is refused" bash -c "! '$gs' --create --public '$t/src' https://dev.azure.com/org1/proj1/_git/pub && [[ ! -d '$t/azure/org1/proj1/_git/pub' ]]"
-check "azure: a failing az is a FAIL, not a create" bash -c "! AZ_FAIL=1 '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azdown && [[ ! -d '$t/azure/org1/proj1/_git/azdown' ]]"
+check "azure: --public is refused before any az call" bash -c "! '$gs' --create --public '$t/src' https://dev.azure.com/org1/proj1/_git/pub && [[ ! -d '$t/azure/org1/proj1/_git/pub' ]] && ! grep -q -- '--repository pub\\|--name pub' '$t/az.log'"
+check "azure: a failing az is a FAIL, not a create" bash -c "! AZ_FAIL=1 '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azdown && [[ ! -d '$t/azure/org1/proj1/_git/azdown' ]] && ! grep -q 'repos create --name azdown' '$t/az.log'"
+check "azure: dry run does not claim a visibility" bash -c "'$gs' --create --dry-run '$t/src' https://dev.azure.com/org1/proj1/_git/dry2 | grep -q 'visibility: set by the project'"
+check "azure: percent-encoded characters other than %20 are decoded" bash -c "'$gs' --create '$t/src' 'https://dev.azure.com/org1/R%26D/_git/enc'; grep -q -- '--project R&D' '$t/az.log'"
+mkdir -p azure/org1/proj1/_git/azbroken
+check "azure: an existing unreadable repo is not recreated" bash -c "! '$gs' --create '$t/src' https://dev.azure.com/org1/proj1/_git/azbroken && ! grep -q 'repos create --name azbroken' '$t/az.log'"
+check "azure: an empty --dst-token-env is refused" bash -c "! env -u NO_SUCH_TOK '$gs' --create --dst-token-env NO_SUCH_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/emptytok && ! grep -q 'repos create --name emptytok' '$t/az.log'"
+check "azure: a legacy visualstudio.com URL is reported as unsupported" bash -c "! '$gs' --create '$t/src' https://org1.visualstudio.com/proj1/_git/legacy"
+check "azure: a missing project says to create the project first" bash -c "'$gs' --create '$t/src' https://dev.azure.com/org1/noproj/_git/r 2>&1 | grep -q 'create the project first'"
 AZ_TOK=aztok check "azure: PAT reaches az through the environment, not argv" bash -c "'$gs' --create --dst-token-env AZ_TOK '$t/src' https://dev.azure.com/org1/proj1/_git/withpat && grep -q 'az-pat-from:aztok' '$t/az.log.env' && ! grep -q aztok '$t/az.log'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@bitbucket.org:me/x.git"
 

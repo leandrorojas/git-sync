@@ -16,7 +16,7 @@
 #   --force     allow a non-empty destination on the first run, and non-fast-forward updates
 #   --prune     delete branches/tags at the destination that no longer exist at the source
 #   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`
-#   --public    with --create, make the new repo public
+#   --public    with --create, make the new repo public (refused on Azure DevOps, where the project sets it)
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
 # Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} as defaults.
@@ -111,11 +111,14 @@ create_azure() {
   elif [[ ${#p[@]} -eq 3 && ${p[1]} == _git ]]; then org=${p[0]} proj=${p[2]} repo=${p[2]}
   elif [[ ${#p[@]} -eq 4 && ${p[0]} == v3 ]]; then org=${p[1]} proj=${p[2]} repo=${p[3]}
   else echo "cannot read organization, project and repo from the URL" >&2; return 1; fi
-  proj=${proj//%20/ }; repo=${repo//%20/ }
+  proj=$(printf '%b' "${proj//%/\\x}"); repo=$(printf '%b' "${repo//%/\\x}")
+  visibility_note="set by the project"
   local orgurl=https://dev.azure.com/$org err
   if err=$(az_dst repos show --repository "$repo" --project "$proj" --organization "$orgurl" -o none 2>&1); then return 2; fi
+  [[ $err != *TF200016* ]] ||
+    { echo "Azure DevOps project '$proj' does not exist; --create makes repos, not projects, so create the project first" >&2; return 1; }
   [[ $err == *TF401019* ]] ||
-    { echo "az could not check the repo (azure-devops extension missing, not logged in, bad PAT or unknown project)" >&2; return 1; }
+    { echo "az could not check the repo (azure-devops extension missing, not logged in or bad PAT)" >&2; return 1; }
   [[ $2 == check ]] && return 0
   az_dst repos create --name "$repo" --project "$proj" --organization "$orgurl" -o none || return 1
 }
@@ -150,10 +153,10 @@ sync_one() {
     { echo "FAIL $name: source has no branches; refusing to continue" >&2; return 1; }
   if ! dstrefs=$(refs DST "$dst"); then
     if (( create )); then
-      create_dest "$dst" check; local rc=$?
+      visibility_note=$visibility; create_dest "$dst" check; local rc=$?
       (( rc == 2 )) && { echo "FAIL $name: destination exists but cannot be read (auth)" >&2; return 1; }
       (( rc == 0 )) || { echo "FAIL $name: cannot create destination" >&2; return 1; }
-      if (( dry )); then echo "ok   $name (dry run: destination missing, would create it as $visibility)"; return 0; fi
+      if (( dry )); then echo "ok   $name (dry run: destination missing, would create it, visibility: $visibility_note)"; return 0; fi
       create_dest "$dst" create || { echo "FAIL $name: could not create destination" >&2; return 1; }
       dstrefs=$(refs DST "$dst") || { echo "FAIL $name: created destination but cannot read it (auth)" >&2; return 1; }
     else
