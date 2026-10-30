@@ -7,9 +7,10 @@
 #   git-sync [options] -f <pairs-file>
 #
 # Pairs file: one pair per line, "# comments" and blank lines ignored:
-#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U] [dst_api_user=U]
+#   <source-url> <dest-url> [src_key=PATH] [dst_key=PATH] [src_token_env=VAR] [dst_token_env=VAR] [src_user=U] [dst_user=U] [dst_api_user=U] [dst_prefix=P]
 #   key = SSH private key file. token_env = NAME of an env var holding an HTTPS token (the file never holds secrets).
 #   user = HTTPS user name for git (default x-access-token; x-token-auth on bitbucket.org).
+#   dst_prefix = see --dst-prefix, for this pair only (empty = none).
 #   dst_api_user = Bitbucket only: the account email, when the token is an API token; without it the token is a Bearer access token.
 #                  An API token also needs dst_user=x-bitbucket-api-token-auth (the name comes from third-party docs, unconfirmed).
 #
@@ -21,30 +22,41 @@
 #   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`,
 #               gitlab.com and bitbucket.org via their APIs (need a token: --dst-token-env or dst_token_env=)
 #   --public    with --create, make the new repo public (refused on Azure DevOps, where the project sets it)
+#   --dst-prefix P  land branches as P/<branch> and tags as P/<tag> at the destination, so several sources can share one
+#               destination repo; the first-sync check, --prune and the verification only look at refs under P/
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
 #
-# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER} and GIT_SYNC_DST_API_USER as defaults.
+# Env: GIT_SYNC_DIR (cache, default ~/.cache/git-sync), GIT_SYNC_{SRC,DST}_{KEY,TOKEN_ENV,USER}, GIT_SYNC_DST_API_USER and GIT_SYNC_DST_PREFIX as defaults.
 # Exit: 0 all pairs ok, 1 at least one pair failed, 2 bad usage.
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 dry=0; force=0; prune=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
 D_SRC_USER=${GIT_SYNC_SRC_USER:-}; D_DST_USER=${GIT_SYNC_DST_USER:-}
-D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}
+D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}; D_DST_PREFIX=${GIT_SYNC_DST_PREFIX:-}
 while [[ ${1:-} == -* ]]; do
   case $1 in
     --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --create) create=1;; --public) visibility=public;;
     -f) file=${2:-}; shift;;
     --src-key) D_SRC_KEY=${2:-}; shift;; --dst-key) D_DST_KEY=${2:-}; shift;;
-    --src-token-env) D_SRC_TOKEN_ENV=${2:-}; shift;; --dst-token-env) D_DST_TOKEN_ENV=${2:-}; shift;;
+    --src-token-env) D_SRC_TOKEN_ENV=${2:-}; shift;; --dst-token-env) D_DST_TOKEN_ENV=${2:-}; shift;; --dst-prefix) D_DST_PREFIX=${2:-}; shift;;
     *) usage;;
   esac; shift
 done
 if [[ -n $file ]]; then [[ $# -eq 0 && -f $file ]] || usage; else [[ $# -eq 2 ]] || usage; fi
+
+# bad_prefix <prefix>: succeeds, and says why on stderr, when the prefix can't head a branch or tag name.
+bad_prefix() {
+  [[ -z $1 ]] && return 1
+  [[ $1 != -* ]] && git check-ref-format "refs/heads/$1/x" && git check-ref-format "refs/tags/$1/x" && return 1
+  echo "invalid prefix '$1': it must work as a branch and tag name prefix (no leading or trailing slash, '..', spaces, ...)" >&2
+  return 0
+}
+bad_prefix "$D_DST_PREFIX" && exit 2
 
 cache_root=${GIT_SYNC_DIR:-$HOME/.cache/git-sync}
 mkdir -p "$cache_root" || exit 1
@@ -239,9 +251,25 @@ refs() {
   return 0
 }
 
+add_prefix() {
+  awk -F'\t' -v p="$1" '{ r = $2; if (index(r, "refs/heads/") == 1) r = "refs/heads/" p "/" substr(r, 12); else r = "refs/tags/" p "/" substr(r, 11); print $1 "\t" r }'
+}
+
+under_prefix() {
+  awk -F'\t' -v h="refs/heads/$1/" -v t="refs/tags/$1/" 'index($2, h) == 1 || index($2, t) == 1'
+}
+
+# prefix_clashes <prefix>: prints the "sha<TAB>ref" lines read from stdin that can't coexist with refs under the prefix
+# (a branch or tag named like the prefix, or like a leading part of it).
+prefix_clashes() {
+  awk -F'\t' -v p="$1" 'function clash(k) { return index($2, k) == 1 && index(k p "/", $2 "/") == 1 }
+    clash("refs/heads/") || clash("refs/tags/")'
+}
+
 sync_one() {
   local src=$1 dst=$2 name; name=$(basename "$src"); name=${name%.git}
-  local id; id=$( { printf '%s\n%s' "$src" "$dst" | { shasum 2>/dev/null || sha1sum; }; } | cut -c1-12)
+  local pfx=$DST_PREFIX; [[ -z $pfx ]] || name="$name ($pfx/)"
+  local id; id=$( { printf '%s\n%s' "$src" "$dst"; [[ -z $pfx ]] || printf '\n%s' "$pfx"; } | { shasum 2>/dev/null || sha1sum; } | cut -c1-12)
   local cache=$cache_root/$id.git first=0
   [[ -d $cache ]] || first=1
 
@@ -261,7 +289,16 @@ sync_one() {
       echo "FAIL $name: cannot read destination (auth, URL or repo missing; --create makes a missing one)" >&2; return 1
     fi
   fi
-  if (( first && force == 0 )) && [[ -n $dstrefs ]]; then
+  local dstown=$dstrefs
+  if [[ -n $pfx ]]; then
+    local clash; clash=$(printf '%s\n' "$dstrefs" | prefix_clashes "$pfx" | cut -f2)
+    if [[ -n $clash ]]; then
+      echo "FAIL $name: the destination has $(printf '%s' "$clash" | tr '\n' ' ')which clashes with the prefix '$pfx'; pick another prefix or remove that ref" >&2
+      return 1
+    fi
+    dstown=$(printf '%s\n' "$dstrefs" | under_prefix "$pfx")
+  fi
+  if (( first && force == 0 )) && [[ -n $dstown ]]; then
     echo "FAIL $name: destination already has refs and this pair was never synced here; rerun with --force to adopt it" >&2
     return 1
   fi
@@ -274,15 +311,17 @@ sync_one() {
 
   local -a flags=()
   (( force )) && flags+=(--force); (( prune )) && flags+=(--prune); (( dry )) && flags+=(--dry-run)
+  local to=; [[ -z $pfx ]] || to=$pfx/
   gitc DST -C "$cache" push -q ${flags[@]+"${flags[@]}"} "$dst" \
-    'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' ||
+    "refs/heads/*:refs/heads/$to*" "refs/tags/*:refs/tags/$to*" ||
     { echo "FAIL $name: push failed (rejected refs need --force; read-only credentials also land here)" >&2; return 1; }
 
   if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed)"; return 0; fi
 
   local after missing
   after=$(refs DST "$dst") || { echo "FAIL $name: pushed, but could not re-read destination to verify" >&2; return 1; }
-  missing=$(comm -23 <(printf '%s\n' "$srcrefs") <(printf '%s\n' "$after"))
+  local want=$srcrefs; [[ -z $pfx ]] || want=$(printf '%s\n' "$srcrefs" | add_prefix "$pfx")
+  missing=$(comm -23 <(printf '%s\n' "$want" | sort) <(printf '%s\n' "$after" | sort))
   if [[ -n $missing ]]; then
     echo "FAIL $name: destination differs from source after push:" >&2
     printf '%s\n' "$missing" | sed 's/^/       /' >&2
@@ -301,13 +340,13 @@ default_user() {
 run_pair() { # src dst [k=v ...]
   local src=$1 dst=$2; shift 2
   SRC_KEY=$D_SRC_KEY; DST_KEY=$D_DST_KEY; SRC_TOKEN_ENV=$D_SRC_TOKEN_ENV; DST_TOKEN_ENV=$D_DST_TOKEN_ENV
-  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER; DST_API_USER=$D_DST_API_USER
+  SRC_USER=$D_SRC_USER; DST_USER=$D_DST_USER; DST_API_USER=$D_DST_API_USER; DST_PREFIX=$D_DST_PREFIX
   local kv
   for kv in "$@"; do
     case $kv in
       src_key=*) SRC_KEY=${kv#*=};; dst_key=*) DST_KEY=${kv#*=};;
       src_token_env=*) SRC_TOKEN_ENV=${kv#*=};; dst_token_env=*) DST_TOKEN_ENV=${kv#*=};;
-      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};; dst_api_user=*) DST_API_USER=${kv#*=};;
+      src_user=*) SRC_USER=${kv#*=};; dst_user=*) DST_USER=${kv#*=};; dst_api_user=*) DST_API_USER=${kv#*=};; dst_prefix=*) DST_PREFIX=${kv#*=};;
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
@@ -319,8 +358,32 @@ run_pair() { # src dst [k=v ...]
   sync_one "$src" "$dst"
 }
 
+dest_id() { parse_url "$1"; printf '%s %s' "$url_host" "$url_path"; }
+
+# Pairs that would write into each other's refs are refused before anything runs.
+check_pairs() {
+  local -a ids=() pfxs=(); local line=0 src dst rest kv p i
+  while read -r src dst rest; do
+    line=$((line+1)); [[ -z $src || $src == \#* || -z $dst ]] && continue
+    p=$D_DST_PREFIX
+    for kv in $rest; do [[ $kv == dst_prefix=* ]] && p=${kv#*=}; done
+    bad_prefix "$p" && { echo "  (line $line of $file)" >&2; exit 2; }
+    ids+=("$(dest_id "$dst")"); pfxs+=("$p")
+  done < "$file"
+  local n=${#ids[@]} j
+  for ((i=0; i<n; i++)); do for ((j=i+1; j<n; j++)); do
+    [[ ${ids[i]} == "${ids[j]}" ]] || continue
+    [[ -z ${pfxs[i]}${pfxs[j]} ]] && continue
+    if [[ -z ${pfxs[i]} || -z ${pfxs[j]} || ${pfxs[i]}/ == "${pfxs[j]}/"* || ${pfxs[j]}/ == "${pfxs[i]}/"* ]]; then
+      echo "two pairs write to the same destination with overlapping prefixes ('${pfxs[i]}' and '${pfxs[j]}'); they would overwrite each other" >&2
+      exit 2
+    fi
+  done; done
+}
+
 failed=0
 if [[ -n $file ]]; then
+  check_pairs
   while read -r src dst rest; do
     [[ -z $src || $src == \#* ]] && continue
     if [[ -z $dst ]]; then echo "FAIL $src: line has no destination" >&2; failed=1; continue; fi
