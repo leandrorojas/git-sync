@@ -229,5 +229,61 @@ BB_TOK=bbtok check "bitbucket: a dot-segment path is refused before any call" ba
 GL_TOK=gltok check "gitlab: a dot-segment path is refused before any call" bash -c "! '$gs' --create --dst-token-env GL_TOK '$t/src' https://gitlab.com/me/.. && ! grep -q 'projects/me%2F\.\.' '$t/gl.log.req'"
 check "--create on an unsupported host fails" bash -c "! '$gs' --create '$t/src' git@example.org:me/x.git"
 
+# --dst-prefix: several sources, one destination
+for n in pa pb; do git init -q -b main $n; (cd $n && echo $n > f && git add f && git commit -qm $n && git tag -a v1 -m v1 && git branch feat); done
+git init -q --bare multi.git
+pfx_refs() { git -C multi.git for-each-ref --format='%(refname)' | tr '\n' ' '; }; export -f pfx_refs
+check "prefix: a dry run leaves the destination empty" bash -c "'$gs' --dry-run --dst-prefix pa '$t/pa' '$t/multi.git' && [[ -z \$(git -C '$t/multi.git' for-each-ref) ]]"
+check "prefix: first source lands under its prefix" bash -c "'$gs' --dst-prefix pa '$t/pa' '$t/multi.git' && [[ \"\$(pfx_refs)\" == 'refs/heads/pa/feat refs/heads/pa/main refs/tags/pa/v1 ' ]]"
+check "prefix: a second source with the same branch and tag names needs no --force" bash -c "'$gs' --dst-prefix pb '$t/pb' '$t/multi.git'"
+check "prefix: both sources sit side by side" bash -c "[[ \"\$(pfx_refs)\" == *'refs/heads/pb/main'* && \"\$(pfx_refs)\" == *'refs/tags/pa/v1'* && \"\$(pfx_refs)\" == *'refs/tags/pb/v1'* ]]"
+check "prefix: each branch keeps its source commit" bash -c "[[ \$(git -C multi.git rev-parse pa/main) == \$(git -C pa rev-parse main) && \$(git -C multi.git rev-parse pb/main) == \$(git -C pb rev-parse main) ]]"
+check "prefix: nothing lands without the prefix" bash -c "! git -C multi.git show-ref --verify -q refs/heads/main"
+(cd pa && echo more >> f && git commit -qam c2)
+check "prefix: an incremental sync picks up the new commit" bash -c "'$gs' --dst-prefix pa '$t/pa' '$t/multi.git' && [[ \$(git -C multi.git rev-parse pa/main) == \$(git -C pa rev-parse main) ]]"
+check "prefix: the prefixed pair has its own cache" bash -c "[[ \$(ls '$t/cache' | wc -l) -gt 1 ]]"
+(cd pa && git branch -D feat -q && git tag -d v1 >/dev/null)
+"$gs" --dst-prefix pa "$t/pa" "$t/multi.git" >/dev/null 2>&1
+check "prefix: a deleted source branch and tag stay without --prune" bash -c "git -C multi.git show-ref --verify -q refs/heads/pa/feat && git -C multi.git show-ref --verify -q refs/tags/pa/v1"
+git -C multi.git update-ref refs/heads/legacy "$(git -C multi.git rev-parse pb/main)"
+check "prefix: --prune removes the deleted branch and tag" bash -c "'$gs' --prune --dst-prefix pa '$t/pa' '$t/multi.git' && ! git -C multi.git show-ref --verify -q refs/heads/pa/feat && ! git -C multi.git show-ref --verify -q refs/tags/pa/v1"
+check "prefix: --prune leaves the other prefix and unprefixed refs alone" bash -c "[[ \"\$(pfx_refs)\" == *'refs/heads/pb/feat'* && \"\$(pfx_refs)\" == *'refs/tags/pb/v1'* && \"\$(pfx_refs)\" == *'refs/heads/legacy'* ]]"
+check "prefix: an existing prefix at the destination needs --force on a fresh cache" bash -c "/bin/rm -rf '$t/cache' && ! '$gs' --dst-prefix pb '$t/pb' '$t/multi.git' && '$gs' --force --dst-prefix pb '$t/pb' '$t/multi.git'"
+check "prefix: GIT_SYNC_DST_PREFIX is the default" bash -c "git init -q --bare '$t/envdst.git' && GIT_SYNC_DST_PREFIX=envp '$gs' '$t/pa' '$t/envdst.git' && git -C '$t/envdst.git' show-ref --verify -q refs/heads/envp/main"
+
+for bad in /x x/ a..b "a b" a//b .a a.lock '-a' 'a~1'; do
+  check "prefix: invalid prefix '$bad' exits 2" bash -c "'$gs' --dst-prefix '$bad' '$t/pa' '$t/multi.git'; [[ \$? -eq 2 ]]"
+done
+check "prefix: nothing is pushed for an invalid prefix" bash -c "[[ \"\$(pfx_refs)\" != *'a b'* ]]"
+printf '%s %s dst_prefix=a..b\n' "$t/pa" "$t/multi.git" > badpfx.txt
+check "prefix: an invalid prefix in a pairs file exits 2" bash -c "'$gs' -f '$t/badpfx.txt'; [[ \$? -eq 2 ]]"
+
+git init -q --bare clash.git
+(cd pa && git push -q "$t/clash.git" main:refs/heads/x)
+check "prefix: a branch named like the prefix fails with a clear message" bash -c "'$gs' --force --dst-prefix x '$t/pa' '$t/clash.git' 2>&1 | grep -q \"clashes with the prefix 'x'\""
+check "prefix: a branch named like the start of the prefix fails too" bash -c "'$gs' --force --dst-prefix x/y '$t/pa' '$t/clash.git' 2>&1 | grep -q \"clashes with the prefix 'x/y'\""
+(cd pa && git tag -a t1 -m t1 && git push -q "$t/clash.git" t1:refs/tags/t)
+check "prefix: a tag named like the prefix fails too" bash -c "'$gs' --force --dst-prefix t '$t/pa' '$t/clash.git' 2>&1 | grep -q \"clashes with the prefix 't'\""
+check "prefix: an unrelated prefix works beside those refs" bash -c "'$gs' --dst-prefix xx '$t/pa' '$t/clash.git' && git -C '$t/clash.git' show-ref --verify -q refs/heads/xx/main"
+
+git init -q --bare dup.git
+printf '%s %s dst_prefix=one\n%s %s dst_prefix=one\n' "$t/pa" "$t/dup.git" "$t/pb" "$t/dup.git" > dup1.txt
+printf '%s %s dst_prefix=one\n%s %s\n' "$t/pa" "$t/dup.git" "$t/pb" "$t/dup.git" > dup2.txt
+printf '%s %s dst_prefix=one\n%s %s dst_prefix=one/two\n' "$t/pa" "$t/dup.git" "$t/pb" "$t/dup.git" > dup3.txt
+printf '%s %s dst_prefix=one\n%s %s/ dst_prefix=one\n' "$t/pa" "file://$t/dup.git" "$t/pb" "file://$t/dup.git" > dup4.txt
+printf '%s %s dst_prefix=one\n%s %s dst_prefix=two\n' "$t/pa" "$t/dup.git" "$t/pb" "$t/dup.git" > ok1.txt
+for f in dup1 dup2 dup3 dup4; do
+  check "prefix: $f.txt is rejected before any pair runs" bash -c "'$gs' -f '$t/$f.txt'; [[ \$? -eq 2 && -z \$(git -C '$t/dup.git' for-each-ref) ]]"
+done
+check "prefix: different prefixes on one destination are accepted" bash -c "'$gs' -f '$t/ok1.txt' && git -C '$t/dup.git' show-ref --verify -q refs/heads/two/main"
+check "prefix: dst_prefix= in a pairs file overrides the default" bash -c "git init -q --bare '$t/ovr.git' && printf '%s %s dst_prefix=\n' '$t/pa' '$t/ovr.git' > '$t/ovr.txt' && '$gs' --dst-prefix zz -f '$t/ovr.txt' && git -C '$t/ovr.git' show-ref --verify -q refs/heads/main"
+
+git init -q -b main many; (cd many && for i in 1 2 3 4 5 6; do echo $i > f && git add f && git commit -qm $i; done
+  hi=$(git rev-list main | sort | tail -1); lo=$(git rev-list main | sort | head -1); git branch a "$lo"; git branch b "$hi")
+check "verification holds with many branches whatever their hash order" bash -c "git init -q --bare '$t/many.git' && git -C many push -q '$t/many.git' b:refs/heads/0z && '$gs' --force '$t/many' '$t/many.git'"
+check "prefix: many branches verify under a prefix too" bash -c "git init -q --bare '$t/many2.git' && '$gs' --dst-prefix p '$t/many' '$t/many2.git'"
+
+check "prefix: unprefixed sync still lands under the original names" bash -c "git init -q --bare '$t/plain.git' && '$gs' '$t/pb' '$t/plain.git' && [[ \"\$(git -C '$t/plain.git' for-each-ref --format='%(refname)' | tr '\n' ' ')\" == 'refs/heads/feat refs/heads/main refs/tags/v1 ' ]]"
+
 echo "$pass passed, $fail failed"
 exit $((fail > 0))
