@@ -241,7 +241,8 @@ check "prefix: each branch keeps its source commit" bash -c "[[ \$(git -C multi.
 check "prefix: nothing lands without the prefix" bash -c "! git -C multi.git show-ref --verify -q refs/heads/main"
 (cd pa && echo more >> f && git commit -qam c2)
 check "prefix: an incremental sync picks up the new commit" bash -c "'$gs' --dst-prefix pa '$t/pa' '$t/multi.git' && [[ \$(git -C multi.git rev-parse pa/main) == \$(git -C pa rev-parse main) ]]"
-check "prefix: the prefixed pair has its own cache" bash -c "[[ \$(ls '$t/cache' | wc -l) -gt 1 ]]"
+git init -q --bare cachechk.git; "$gs" --dst-prefix x1 "$t/pa" "$t/cachechk.git" >/dev/null 2>&1; caches=$(ls "$GIT_SYNC_DIR" | wc -l)
+check "prefix: the same pair under another prefix gets its own cache" bash -c "'$gs' --dst-prefix x2 '$t/pa' '$t/cachechk.git' && [[ \$(ls '$t/cache' | wc -l) -gt $caches ]]"
 (cd pa && git branch -D feat -q && git tag -d v1 >/dev/null)
 "$gs" --dst-prefix pa "$t/pa" "$t/multi.git" >/dev/null 2>&1
 check "prefix: a deleted source branch and tag stay without --prune" bash -c "git -C multi.git show-ref --verify -q refs/heads/pa/feat && git -C multi.git show-ref --verify -q refs/tags/pa/v1"
@@ -251,10 +252,11 @@ check "prefix: --prune leaves the other prefix and unprefixed refs alone" bash -
 check "prefix: an existing prefix at the destination needs --force on a fresh cache" bash -c "/bin/rm -rf '$t/cache' && ! '$gs' --dst-prefix pb '$t/pb' '$t/multi.git' && '$gs' --force --dst-prefix pb '$t/pb' '$t/multi.git'"
 check "prefix: GIT_SYNC_DST_PREFIX is the default" bash -c "git init -q --bare '$t/envdst.git' && GIT_SYNC_DST_PREFIX=envp '$gs' '$t/pa' '$t/envdst.git' && git -C '$t/envdst.git' show-ref --verify -q refs/heads/envp/main"
 
+before=$(pfx_refs)
 for bad in /x x/ a..b "a b" a//b .a a.lock '-a' 'a~1'; do
   check "prefix: invalid prefix '$bad' exits 2" bash -c "'$gs' --dst-prefix '$bad' '$t/pa' '$t/multi.git'; [[ \$? -eq 2 ]]"
 done
-check "prefix: nothing is pushed for an invalid prefix" bash -c "[[ \"\$(pfx_refs)\" != *'a b'* ]]"
+check "prefix: nothing is pushed for an invalid prefix" bash -c "[[ \"\$(pfx_refs)\" == '$before' ]]"
 printf '%s %s dst_prefix=a..b\n' "$t/pa" "$t/multi.git" > badpfx.txt
 check "prefix: an invalid prefix in a pairs file exits 2" bash -c "'$gs' -f '$t/badpfx.txt'; [[ \$? -eq 2 ]]"
 

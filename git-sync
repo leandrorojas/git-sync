@@ -251,12 +251,10 @@ refs() {
   return 0
 }
 
-# add_prefix <prefix>: rewrites "sha<TAB>ref" lines read from stdin so heads and tags sit under the prefix.
 add_prefix() {
-  awk -F'\t' -v p="$1" '{ r = $2; if (index(r, "refs/heads/") == 1) r = "refs/heads/" p "/" substr(r, 12); else r = "refs/tags/" p "/" substr(r, 11); print $1 "\t" r }' | sort -k2
+  awk -F'\t' -v p="$1" '{ r = $2; if (index(r, "refs/heads/") == 1) r = "refs/heads/" p "/" substr(r, 12); else r = "refs/tags/" p "/" substr(r, 11); print $1 "\t" r }'
 }
 
-# under_prefix <prefix>: keeps the "sha<TAB>ref" lines read from stdin that sit under the prefix.
 under_prefix() {
   awk -F'\t' -v h="refs/heads/$1/" -v t="refs/tags/$1/" 'index($2, h) == 1 || index($2, t) == 1'
 }
@@ -360,7 +358,6 @@ run_pair() { # src dst [k=v ...]
   sync_one "$src" "$dst"
 }
 
-# dest_id <url>: the destination's host and path, so spellings of one repo compare equal.
 dest_id() { parse_url "$1"; printf '%s %s' "$url_host" "$url_path"; }
 
 # Pairs that would write into each other's refs are refused before anything runs.
