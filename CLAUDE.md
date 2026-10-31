@@ -22,6 +22,8 @@ When I say "migrate <old url> to <new url>", or hand over a pairs file:
 - A destination that looks missing may be an existing repo the credentials can't see (GitHub, GitLab, Bitbucket and Azure answer "not found" for both). `--create` then fails on the real run with an already-exists error, and a dry run can't predict it.
 - The default branch of a new destination isn't set by the script. With prefixes the destination has no plain `main` at all, so someone must pick a default branch (for example `P/main`) in the host's settings.
 - `--prune` with a prefix deletes only refs under that prefix. Without a prefix it deletes anything at the destination that the source doesn't have, including other sources' prefixed branches; never run an unprefixed `--prune` on a shared destination. The refusal to run overlapping pairs only covers one run, not separate cron lines.
+- The cache id of an existing pair must not change (unprefixed: the hash of source and destination only; prefixed: plus the prefix). A new id orphans the cache, and the pair then demands `--force` as if it were new.
+- Ref lists compared with `comm` must be sorted as whole lines, not by ref name; with name-sorted input, `comm` reports refs as missing once the destination holds refs the source lacks.
 - A destination branch or tag named like the prefix (`a` for prefix `a`, or `a` for prefix `a/b`) can't coexist with it; the pair fails and says which ref.
 - `--prune` deletes at the destination; without it, branches deleted at the source stay there.
 - `pairs*.txt` and `*.pairs` are git-ignored because they list private URLs. The repo is public: keep real URLs and secrets out of it.
