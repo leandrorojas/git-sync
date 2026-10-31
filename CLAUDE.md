@@ -7,9 +7,10 @@ When I say "migrate <old url> to <new url>", or hand over a pairs file:
 1. Confirm the destination repo exists and is empty. If it doesn't, offer `--create` (private; `--public` only if I say so; on Azure DevOps the project sets the visibility, and the project must already exist). It works for GitHub (through `gh`), Azure DevOps (through `az`, which needs the `azure-devops` extension), gitlab.com and bitbucket.org (through their APIs, which need a token via `--dst-token-env`, `api` scope on GitLab; Bitbucket's credential setup is under Traps); for other hosts, ask me to create the repo.
 2. Ask which credentials each side needs: SSH key path or token env var name, per side (a Bitbucket API token needs more than a token; see Traps). Never ask me to paste a secret, and never put one in the pairs file or on a command line.
 3. If several sources should land in one destination repo, give each its own `--dst-prefix` (or `dst_prefix=` in the pairs file; the repo name is a good prefix). Two pairs on one destination can't share or nest prefixes, and an unprefixed pair can't share a destination with a prefixed one; the run refuses to start.
-4. Run with `--dry-run` first, then for real. Report each line it prints. On a real run `ok` means every source ref was verified at the destination; a dry-run `ok` only says what was simulated (with `--create` and a missing destination, nothing is fetched or pushed).
-5. A `FAIL` line says why. `--force` only after I agree: it allows a non-empty destination and overwriting rewritten history.
-6. For a recurring sync, propose a cron line on the host that has both credentials; don't install it without asking.
+4. For a backup where merged PRs already hold the history, offer `--skip-merged`: it leaves out branches already merged into the source's default branch. It's off by default, so a migration copies every branch.
+5. Run with `--dry-run` first, then for real. Report each line it prints. On a real run `ok` means every source ref was verified at the destination; a dry-run `ok` only says what was simulated (with `--create` and a missing destination, nothing is fetched or pushed).
+6. A `FAIL` line says why. `--force` only after I agree: it allows a non-empty destination and overwriting rewritten history.
+7. For a recurring sync, propose a cron line on the host that has both credentials; don't install it without asking.
 
 ## Traps
 - Only git data moves, not issues, PRs, wikis or permissions. Say so before a migration.
@@ -24,6 +25,8 @@ When I say "migrate <old url> to <new url>", or hand over a pairs file:
 - `--prune` with a prefix deletes only refs under that prefix. Without a prefix it deletes anything at the destination that the source doesn't have, including other sources' prefixed branches; never run an unprefixed `--prune` on a shared destination. The refusal to run overlapping pairs only covers one run, not separate cron lines.
 - The cache id of an existing pair must not change (unprefixed: the hash of source and destination only; prefixed: plus the prefix). A new id orphans the cache, and the pair then demands `--force` as if it were new.
 - Ref lists compared with `comm` must be sorted as whole lines, not by ref name; with name-sorted input, `comm` reports refs as missing once the destination holds refs the source lacks.
+- `--skip-merged` only recognises a branch whose tip is in the default branch's history. A squash-merged or rebased branch has a different tip, so it is still copied. A branch with no commits of its own counts as merged. The default branch is the one the source's HEAD names; a source without one fails the pair.
+- Branches already at the destination aren't touched by `--skip-merged` alone; adding `--prune` deletes them there. Ask me before running that on an existing destination.
 - A destination branch or tag named like the prefix (`a` for prefix `a`, or `a` for prefix `a/b`) can't coexist with it; the pair fails and says which ref.
 - `--prune` deletes at the destination; without it, branches deleted at the source stay there.
 - `pairs*.txt` and `*.pairs` are git-ignored because they list private URLs. The repo is public: keep real URLs and secrets out of it.

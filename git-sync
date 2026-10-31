@@ -22,6 +22,8 @@
 #   --create    create the destination repo if it doesn't exist (private); GitHub via `gh`, Azure DevOps via `az`,
 #               gitlab.com and bitbucket.org via their APIs (need a token: --dst-token-env or dst_token_env=)
 #   --public    with --create, make the new repo public (refused on Azure DevOps, where the project sets it)
+#   --skip-merged  leave out branches already merged into the source's default branch (their commits stay in that branch);
+#               tags are always copied. With --prune, such branches already at the destination are deleted
 #   --dst-prefix P  land branches as P/<branch> and tags as P/<tag> at the destination, so several sources can share one
 #               destination repo; the first-sync check, --prune and the verification only look at refs under P/
 #   --src-key P / --dst-key P / --src-token-env V / --dst-token-env V   default credentials for all pairs
@@ -31,16 +33,16 @@
 set -uo pipefail
 export GIT_TERMINAL_PROMPT=0
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-dry=0; force=0; prune=0; create=0; visibility=private; file=
+dry=0; force=0; prune=0; skip_merged=0; create=0; visibility=private; file=
 D_SRC_KEY=${GIT_SYNC_SRC_KEY:-};  D_DST_KEY=${GIT_SYNC_DST_KEY:-}
 D_SRC_TOKEN_ENV=${GIT_SYNC_SRC_TOKEN_ENV:-}; D_DST_TOKEN_ENV=${GIT_SYNC_DST_TOKEN_ENV:-}
 D_SRC_USER=${GIT_SYNC_SRC_USER:-}; D_DST_USER=${GIT_SYNC_DST_USER:-}
 D_DST_API_USER=${GIT_SYNC_DST_API_USER:-}; D_DST_PREFIX=${GIT_SYNC_DST_PREFIX:-}
 while [[ ${1:-} == -* ]]; do
   case $1 in
-    --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --create) create=1;; --public) visibility=public;;
+    --dry-run) dry=1;; --force) force=1;; --prune) prune=1;; --skip-merged) skip_merged=1;; --create) create=1;; --public) visibility=public;;
     -f) file=${2:-}; shift;;
     --src-key) D_SRC_KEY=${2:-}; shift;; --dst-key) D_DST_KEY=${2:-}; shift;;
     --src-token-env) D_SRC_TOKEN_ENV=${2:-}; shift;; --dst-token-env) D_DST_TOKEN_ENV=${2:-}; shift;; --dst-prefix) D_DST_PREFIX=${2:-}; shift;;
@@ -309,25 +311,43 @@ sync_one() {
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' ||
     { echo "FAIL $name: fetch failed" >&2; return 1; }
 
+  local to=; [[ -z $pfx ]] || to=$pfx/
+  local skipped= note=
+  if (( skip_merged )); then
+    local head def
+    head=$(gitc SRC ls-remote --symref "$src" HEAD) || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
+    def=$(printf '%s\n' "$head" | awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2 }')
+    git -C "$cache" show-ref --verify -q "refs/heads/$def" ||
+      { echo "FAIL $name: --skip-merged needs the source's default branch and could not find it (HEAD: '${def:-none}')" >&2; return 1; }
+    skipped=$(git -C "$cache" for-each-ref --merged="refs/heads/$def" --format='%(refname)' refs/heads/ | grep -vFx "refs/heads/$def")
+    [[ -z $skipped ]] || printf 'delete %s\n' $skipped | git -C "$cache" update-ref --stdin ||
+      { echo "FAIL $name: could not drop merged branches from the cache" >&2; return 1; }
+    if [[ -n $skipped ]]; then
+      local atdst; atdst=$(printf '%s\n' "$dstown" | awk -F'\t' -v to="$to" 'NR == FNR { skip["refs/heads/" to substr($0, 12)]; next } $2 in skip' <(printf '%s\n' "$skipped") - | wc -l | tr -d ' ')
+      note=", $(printf '%s\n' "$skipped" | wc -l | tr -d ' ') merged branches left out; $atdst of them at the destination $( (( prune )) && echo 'are deleted' || echo 'stay (--prune deletes them)')"
+    fi
+  fi
+
   local -a flags=()
   (( force )) && flags+=(--force); (( prune )) && flags+=(--prune); (( dry )) && flags+=(--dry-run)
-  local to=; [[ -z $pfx ]] || to=$pfx/
   gitc DST -C "$cache" push -q ${flags[@]+"${flags[@]}"} "$dst" \
     "refs/heads/*:refs/heads/$to*" "refs/tags/*:refs/tags/$to*" ||
     { echo "FAIL $name: push failed (rejected refs need --force; read-only credentials also land here)" >&2; return 1; }
 
-  if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed)"; return 0; fi
+  if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed$note)"; return 0; fi
 
   local after missing
   after=$(refs DST "$dst") || { echo "FAIL $name: pushed, but could not re-read destination to verify" >&2; return 1; }
-  local want=$srcrefs; [[ -z $pfx ]] || want=$(printf '%s\n' "$srcrefs" | add_prefix "$pfx")
+  local kept=$srcrefs
+  [[ -z $skipped ]] || kept=$(printf '%s\n' "$srcrefs" | awk -F'\t' 'NR == FNR { skip[$0]; next } !($2 in skip)' <(printf '%s\n' "$skipped") -)
+  local want=$kept; [[ -z $pfx ]] || want=$(printf '%s\n' "$kept" | add_prefix "$pfx")
   missing=$(comm -23 <(printf '%s\n' "$want" | sort) <(printf '%s\n' "$after" | sort))
   if [[ -n $missing ]]; then
     echo "FAIL $name: destination differs from source after push:" >&2
     printf '%s\n' "$missing" | sed 's/^/       /' >&2
     return 1
   fi
-  echo "ok   $name ($(printf '%s\n' "$srcrefs" | wc -l | tr -d ' ') refs verified)"
+  echo "ok   $name ($(printf '%s\n' "$kept" | wc -l | tr -d ' ') refs verified$note)"
 }
 
 # The HTTPS user name when none was set. Bitbucket access tokens log in as x-token-auth; the other hosts accept any name.
