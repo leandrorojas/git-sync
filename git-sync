@@ -311,24 +311,30 @@ sync_one() {
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*' ||
     { echo "FAIL $name: fetch failed" >&2; return 1; }
 
-  local skipped=
+  local to=; [[ -z $pfx ]] || to=$pfx/
+  local skipped= note=
   if (( skip_merged )); then
-    local def; def=$(gitc SRC ls-remote --symref "$src" HEAD | awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2 }')
+    local head def
+    head=$(gitc SRC ls-remote --symref "$src" HEAD) || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
+    def=$(printf '%s\n' "$head" | awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2 }')
     git -C "$cache" show-ref --verify -q "refs/heads/$def" ||
       { echo "FAIL $name: --skip-merged needs the source's default branch and could not find it (HEAD: '${def:-none}')" >&2; return 1; }
     skipped=$(git -C "$cache" for-each-ref --merged="refs/heads/$def" --format='%(refname)' refs/heads/ | grep -vFx "refs/heads/$def")
     [[ -z $skipped ]] || printf 'delete %s\n' $skipped | git -C "$cache" update-ref --stdin ||
       { echo "FAIL $name: could not drop merged branches from the cache" >&2; return 1; }
+    if [[ -n $skipped ]]; then
+      local atdst; atdst=$(printf '%s\n' "$dstown" | awk -F'\t' -v to="$to" 'NR == FNR { skip["refs/heads/" to substr($0, 12)]; next } $2 in skip' <(printf '%s\n' "$skipped") - | wc -l | tr -d ' ')
+      note=", $(printf '%s\n' "$skipped" | wc -l | tr -d ' ') merged branches left out; $atdst of them at the destination $( (( prune )) && echo 'are deleted' || echo 'stay (--prune deletes them)')"
+    fi
   fi
 
   local -a flags=()
   (( force )) && flags+=(--force); (( prune )) && flags+=(--prune); (( dry )) && flags+=(--dry-run)
-  local to=; [[ -z $pfx ]] || to=$pfx/
   gitc DST -C "$cache" push -q ${flags[@]+"${flags[@]}"} "$dst" \
     "refs/heads/*:refs/heads/$to*" "refs/tags/*:refs/tags/$to*" ||
     { echo "FAIL $name: push failed (rejected refs need --force; read-only credentials also land here)" >&2; return 1; }
 
-  if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed)"; return 0; fi
+  if (( dry )); then echo "ok   $name (dry run: fetched, push simulated, nothing changed$note)"; return 0; fi
 
   local after missing
   after=$(refs DST "$dst") || { echo "FAIL $name: pushed, but could not re-read destination to verify" >&2; return 1; }
@@ -341,7 +347,6 @@ sync_one() {
     printf '%s\n' "$missing" | sed 's/^/       /' >&2
     return 1
   fi
-  local note=; [[ -z $skipped ]] || note=", $(printf '%s\n' "$skipped" | wc -l | tr -d ' ') merged branches left out"
   echo "ok   $name ($(printf '%s\n' "$kept" | wc -l | tr -d ' ') refs verified$note)"
 }
 
