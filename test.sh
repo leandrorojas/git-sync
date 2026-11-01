@@ -310,5 +310,13 @@ git init -q --bare nohd.git
 check "skip-merged: a source without a usable default branch fails" bash -c "'$gs' --skip-merged '$t/nohead' '$t/nohd.git' 2>&1 | grep -q 'needs the source.s default branch'"
 check "skip-merged: nothing was pushed by the failed run" bash -c "[[ -z \$(git -C '$t/nohd.git' for-each-ref) ]]"
 
+git clone -q "$t/sm" smclone; git init -q --bare smcl.git
+check "skip-merged: a clone with remote-tracking refs works as a source" bash -c "'$gs' --skip-merged '$t/smclone' '$t/smcl.git' 2>&1 | grep -q 'refs verified'"
+git init -q --bare smk1.git; git init -q --bare smk2.git
+printf '%s %s skip_merged=1\n%s %s skip_merged=0\n' "$t/sm" "$t/smk1.git" "$t/sm" "$t/smk2.git" > smk.txt
+check "skip-merged: skip_merged= in a pairs file is per pair" bash -c "'$gs' -f '$t/smk.txt' && [[ \"\$(sm_refs '$t/smk1.git')\" == 'refs/heads/squashed refs/heads/trunk ' && \"\$(sm_refs '$t/smk2.git')\" == *merged-old* ]]"
+check "skip-merged: GIT_SYNC_SKIP_MERGED is the default" bash -c "git init -q --bare '$t/smk3.git' && GIT_SYNC_SKIP_MERGED=1 '$gs' '$t/sm' '$t/smk3.git' && [[ \"\$(sm_refs '$t/smk3.git')\" == 'refs/heads/squashed refs/heads/trunk ' ]]"
+check "skip-merged: a failed first run leaves no cache behind" bash -c "n=\$(ls '$t/cache' | wc -l); ! '$gs' --skip-merged '$t/nohead' '$t/nohd.git'; [[ \$(ls '$t/cache' | wc -l) -eq \$n ]]"
+
 echo "$pass passed, $fail failed"
 exit $((fail > 0))
