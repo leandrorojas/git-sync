@@ -59,6 +59,7 @@ bad_prefix() {
   return 0
 }
 bad_prefix "$D_DST_PREFIX" && exit 2
+[[ $D_SKIP_MERGED == [01] ]] || { echo "GIT_SYNC_SKIP_MERGED must be 0 or 1" >&2; exit 2; }
 
 cache_root=${GIT_SYNC_DIR:-$HOME/.cache/git-sync}
 mkdir -p "$cache_root" || exit 1
@@ -374,6 +375,7 @@ run_pair() { # src dst [k=v ...]
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
+  [[ $SKIP_MERGED == [01] ]] || { echo "FAIL $src: skip_merged must be 0 or 1, not '$SKIP_MERGED'" >&2; return 1; }
   SRC_USER=${SRC_USER:-$(default_user "$src")}; DST_USER=${DST_USER:-$(default_user "$dst")}
   if [[ -n $DST_API_USER && $DST_USER == x-token-auth ]]; then
     echo "FAIL $src: an API token (dst_api_user) also needs dst_user set to the git user name for API tokens; x-token-auth is only for access tokens" >&2
