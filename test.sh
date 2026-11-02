@@ -319,6 +319,9 @@ check "skip-merged: GIT_SYNC_SKIP_MERGED is the default" bash -c "git init -q --
 printf '%s %s skip_merged=yes\n%s %s\n' "$t/sm" "$t/smk1.git" "$t/sm" "$t/smk2.git" > smbad.txt
 check "skip-merged: a bad skip_merged value fails that pair only" bash -c "out=\$('$gs' -f '$t/smbad.txt' 2>&1); rc=\$?; [[ \$rc -eq 1 && \$out == *'skip_merged must be 0 or 1'* && \$out == *'ok   sm'* ]]"
 check "skip-merged: a bad GIT_SYNC_SKIP_MERGED exits 2" bash -c "GIT_SYNC_SKIP_MERGED=true '$gs' '$t/sm' '$t/smk1.git'; [[ \$? -eq 2 ]]"
+check "skip-merged: a source without a default branch creates no destination" bash -c "! '$gs' --create --skip-merged '$t/nohead' git@github.com:me/nohd.git && [[ ! -d '$t/remotes/me/nohd.git' ]]"
+printf '%s %s skip_merged=\n' "$t/sm" "$t/smk1.git" > smempty.txt
+check "skip-merged: an empty skip_merged= means off" bash -c "'$gs' -f '$t/smempty.txt'"
 check "skip-merged: a failed first run leaves no cache behind" bash -c "n=\$(ls '$t/cache' | wc -l); ! '$gs' --skip-merged '$t/nohead' '$t/nohd.git'; [[ \$(ls '$t/cache' | wc -l) -eq \$n ]]"
 
 echo "$pass passed, $fail failed"

@@ -280,6 +280,14 @@ sync_one() {
   srcrefs=$(refs SRC "$src") || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
   [[ -n $(printf '%s\n' "$srcrefs" | grep 'refs/heads/') ]] ||
     { echo "FAIL $name: source has no branches; refusing to continue" >&2; return 1; }
+  local def=
+  if (( SKIP_MERGED )); then
+    local head
+    head=$(gitc SRC ls-remote --symref "$src" HEAD) || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
+    def=$(printf '%s\n' "$head" | awk '$1 == "ref:" && $3 == "HEAD" { sub("refs/heads/", "", $2); print $2; exit }')
+    printf '%s\n' "$srcrefs" | awk -F'\t' -v r="refs/heads/$def" '$2 == r { f = 1 } END { exit !f }' ||
+      { echo "FAIL $name: --skip-merged needs the source's default branch and could not find it (HEAD: '${def:-none}')" >&2; return 1; }
+  fi
   if ! dstrefs=$(refs DST "$dst"); then
     if (( create )); then
       visibility_note=$visibility; create_dest "$dst" check; local rc=$?
@@ -306,14 +314,6 @@ sync_one() {
     return 1
   fi
 
-  local def=
-  if (( SKIP_MERGED )); then
-    local head
-    head=$(gitc SRC ls-remote --symref "$src" HEAD) || { echo "FAIL $name: cannot read source (auth, URL or network)" >&2; return 1; }
-    def=$(printf '%s\n' "$head" | awk '$1 == "ref:" && $3 == "HEAD" { sub("refs/heads/", "", $2); print $2; exit }')
-    printf '%s\n' "$srcrefs" | awk -F'\t' -v r="refs/heads/$def" '$2 == r { f = 1 } END { exit !f }' ||
-      { echo "FAIL $name: --skip-merged needs the source's default branch and could not find it (HEAD: '${def:-none}')" >&2; return 1; }
-  fi
 
   (( first )) && { git init --bare -q "$cache" || return 1; git -C "$cache" config gc.auto 0; }
 
@@ -324,6 +324,8 @@ sync_one() {
   local to=; [[ -z $pfx ]] || to=$pfx/
   local skipped= note=
   if (( SKIP_MERGED )); then
+    git -C "$cache" show-ref --verify -q "refs/heads/$def" ||
+      { echo "FAIL $name: the source's default branch '$def' disappeared during the sync; run again" >&2; return 1; }
     skipped=$(git -C "$cache" for-each-ref --merged="refs/heads/$def" --format='%(refname)' refs/heads/ | grep -vFx "refs/heads/$def")
     [[ -z $skipped ]] || printf 'delete %s\n' $skipped | git -C "$cache" update-ref --stdin ||
       { echo "FAIL $name: could not drop merged branches from the cache" >&2; return 1; }
@@ -375,6 +377,7 @@ run_pair() { # src dst [k=v ...]
       *) echo "FAIL $src: unknown option '$kv' in pairs file" >&2; return 1;;
     esac
   done
+  SKIP_MERGED=${SKIP_MERGED:-0}
   [[ $SKIP_MERGED == [01] ]] || { echo "FAIL $src: skip_merged must be 0 or 1, not '$SKIP_MERGED'" >&2; return 1; }
   SRC_USER=${SRC_USER:-$(default_user "$src")}; DST_USER=${DST_USER:-$(default_user "$dst")}
   if [[ -n $DST_API_USER && $DST_USER == x-token-auth ]]; then
