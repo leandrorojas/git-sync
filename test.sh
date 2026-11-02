@@ -287,5 +287,42 @@ check "prefix: many branches verify under a prefix too" bash -c "git init -q --b
 
 check "prefix: unprefixed sync still lands under the original names" bash -c "git init -q --bare '$t/plain.git' && '$gs' '$t/pb' '$t/plain.git' && [[ \"\$(git -C '$t/plain.git' for-each-ref --format='%(refname)' | tr '\n' ' ')\" == 'refs/heads/feat refs/heads/main refs/tags/v1 ' ]]"
 
+# --skip-merged
+git init -q -b trunk sm; (cd sm && echo 1 > f && git add f && git commit -qm base && git branch merged-old && git tag -a rel1 -m rel1 merged-old
+  git checkout -q -b open && echo 2 > g && git add g && git commit -qm open && git checkout -q trunk && git checkout -q -b squashed && echo 3 > h && git add h && git commit -qm sq && git checkout -q trunk
+  echo 4 >> f && git commit -qam trunk2 && git branch fresh)
+sm_refs() { git -C "$1" for-each-ref --format='%(refname)' refs/heads | tr '\n' ' '; }; export -f sm_refs
+git init -q --bare smd.git
+check "skip-merged: merged branches are left out, the rest and the tag are copied" bash -c "'$gs' --skip-merged '$t/sm' '$t/smd.git' 2>&1 | grep -q '2 merged branches left out; 0 of them at the destination stay' && [[ \"\$(sm_refs '$t/smd.git')\" == 'refs/heads/open refs/heads/squashed refs/heads/trunk ' ]] && git -C '$t/smd.git' show-ref --verify -q refs/tags/rel1"
+git init -q --bare small.git
+check "without --skip-merged everything is copied" bash -c "'$gs' '$t/sm' '$t/small.git' && [[ \"\$(sm_refs '$t/small.git')\" == 'refs/heads/fresh refs/heads/merged-old refs/heads/open refs/heads/squashed refs/heads/trunk ' ]]"
+check "skip-merged: merged branches already at the destination stay without --prune" bash -c "'$gs' --skip-merged '$t/sm' '$t/small.git' && git -C '$t/small.git' show-ref --verify -q refs/heads/merged-old"
+check "skip-merged: --prune deletes them at the destination" bash -c "'$gs' --skip-merged --prune '$t/sm' '$t/small.git' && [[ \"\$(sm_refs '$t/small.git')\" == 'refs/heads/open refs/heads/squashed refs/heads/trunk ' ]]"
+(cd sm && git merge -q --no-ff -m mergeopen open)
+check "skip-merged: a branch merged later is dropped on the next run" bash -c "'$gs' --skip-merged --prune '$t/sm' '$t/small.git' && [[ \"\$(sm_refs '$t/small.git')\" == 'refs/heads/squashed refs/heads/trunk ' ]]"
+git init -q --bare smp.git
+git init -q --bare smdr.git; "$gs" --dst-prefix s "$t/sm" "$t/smdr.git" >/dev/null 2>&1
+check "skip-merged: a dry run says what it leaves out and changes nothing" bash -c "before=\$(git -C '$t/smdr.git' for-each-ref); '$gs' --dry-run --skip-merged --prune --dst-prefix s '$t/sm' '$t/smdr.git' 2>&1 | grep -q '3 merged branches left out; 3 of them at the destination are deleted' && [[ \$(git -C '$t/smdr.git' for-each-ref) == \$before ]]"
+check "skip-merged: --prune with a prefix deletes only the merged branches under it" bash -c "'$gs' --skip-merged --prune --dst-prefix s '$t/sm' '$t/smdr.git' && [[ \"\$(sm_refs '$t/smdr.git')\" == 'refs/heads/s/squashed refs/heads/s/trunk ' ]]"
+check "skip-merged works together with a prefix" bash -c "'$gs' --skip-merged --dst-prefix s '$t/sm' '$t/smp.git' && [[ \"\$(sm_refs '$t/smp.git')\" == 'refs/heads/s/squashed refs/heads/s/trunk ' ]]"
+git init -q -b main nohead; (cd nohead && echo 1 > f && git add f && git commit -qm c && git symbolic-ref HEAD refs/heads/gone)
+git init -q --bare nohd.git
+check "skip-merged: a source without a usable default branch fails" bash -c "'$gs' --skip-merged '$t/nohead' '$t/nohd.git' 2>&1 | grep -q 'needs the source.s default branch'"
+check "skip-merged: nothing was pushed by the failed run" bash -c "[[ -z \$(git -C '$t/nohd.git' for-each-ref) ]]"
+
+git clone -q "$t/sm" smclone; git init -q --bare smcl.git
+check "skip-merged: a clone with remote-tracking refs works as a source" bash -c "'$gs' --skip-merged '$t/smclone' '$t/smcl.git' 2>&1 | grep -q 'refs verified'"
+git init -q --bare smk1.git; git init -q --bare smk2.git
+printf '%s %s skip_merged=1\n%s %s skip_merged=0\n' "$t/sm" "$t/smk1.git" "$t/sm" "$t/smk2.git" > smk.txt
+check "skip-merged: skip_merged= in a pairs file is per pair" bash -c "'$gs' -f '$t/smk.txt' && [[ \"\$(sm_refs '$t/smk1.git')\" == 'refs/heads/squashed refs/heads/trunk ' && \"\$(sm_refs '$t/smk2.git')\" == *merged-old* ]]"
+check "skip-merged: GIT_SYNC_SKIP_MERGED is the default" bash -c "git init -q --bare '$t/smk3.git' && GIT_SYNC_SKIP_MERGED=1 '$gs' '$t/sm' '$t/smk3.git' && [[ \"\$(sm_refs '$t/smk3.git')\" == 'refs/heads/squashed refs/heads/trunk ' ]]"
+printf '%s %s skip_merged=yes\n%s %s\n' "$t/sm" "$t/smk1.git" "$t/sm" "$t/smk2.git" > smbad.txt
+check "skip-merged: a bad skip_merged value fails that pair only" bash -c "out=\$('$gs' -f '$t/smbad.txt' 2>&1); rc=\$?; [[ \$rc -eq 1 && \$out == *'skip_merged must be 0 or 1'* && \$out == *'ok   sm'* ]]"
+check "skip-merged: a bad GIT_SYNC_SKIP_MERGED exits 2" bash -c "GIT_SYNC_SKIP_MERGED=true '$gs' '$t/sm' '$t/smk1.git'; [[ \$? -eq 2 ]]"
+check "skip-merged: a source without a default branch creates no destination" bash -c "! '$gs' --create --skip-merged '$t/nohead' git@github.com:me/nohd.git && [[ ! -d '$t/remotes/me/nohd.git' ]]"
+printf '%s %s skip_merged=\n' "$t/sm" "$t/smk1.git" > smempty.txt
+check "skip-merged: an empty skip_merged= means off" bash -c "'$gs' -f '$t/smempty.txt'"
+check "skip-merged: a failed first run leaves no cache behind" bash -c "n=\$(ls '$t/cache' | wc -l); ! '$gs' --skip-merged '$t/nohead' '$t/nohd.git'; [[ \$(ls '$t/cache' | wc -l) -eq \$n ]]"
+
 echo "$pass passed, $fail failed"
 exit $((fail > 0))
